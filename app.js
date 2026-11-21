@@ -7,6 +7,7 @@ import { firebaseConfig } from './firebase-config.js';
 import {
   SPLIT_LABELS, clean, newCode, newUid, resolveAmounts, computeAll, buildTripFile, parseReceiptBlock, expenseSharesPence,
 } from './logic.js';
+import { CATEGORIES, iconFor, GREETINGS } from './categories.js';
 
 // ---------------------------------------------------------------- setup
 const app = initializeApp(firebaseConfig);
@@ -24,6 +25,10 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const money = (n) => (Number(n) || 0).toLocaleString('en-GB', { style: 'currency', currency: 'GBP' });
 const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const fmtDate = (iso) => (iso ? new Date(`${iso}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) : '');
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fmtShort = (iso) => { if (!iso) return ''; const [, m, d] = iso.split('-'); return `${Number(d)} ${SHORT_MONTHS[Number(m) - 1]}`; };
+const fmtRange = (s, e) => { if (!s) return ''; if (!e || e === s) return fmtShort(s); const [, m1, d1] = s.split('-'); const [, m2] = e.split('-'); return m1 === m2 ? `${Number(d1)}–${fmtShort(e)}` : `${fmtShort(s)} – ${fmtShort(e)}`; };
+const GREETING = GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
 const fmtNum = (n, cur) => `${Number(n).toFixed(2)} ${cur || ''}`.trim();
 
 // ---------------------------------------------------------------- state
@@ -175,14 +180,21 @@ function tripView() {
   const t = S.trip;
   const all = computeAll(t, S.expenses, S.settlements);
   const meRow = all.people.find((p) => p.name === S.me);
-  const body = S.tab === 'balances' ? balancesTab(all) : S.tab === 'settle' ? settleTab(all) : S.tab === 'share' ? shareTab() : expensesTab(all, meRow);
+  const body = S.tab === 'balances' ? balancesTab(all) : S.tab === 'settle' ? settleTab(all) : S.tab === 'share' ? shareTab() : expensesTab(all);
+  const meta = [t.destination, fmtRange(t.start_date, t.end_date)].filter(Boolean).map(esc).join(' · ');
   return `
-    <div class="topbar"><button class="ghost" data-act="home">← Trips</button><span class="grow"></span>${syncBadge()}</div>
-    <h1>${esc(t.name)}</h1>
-    <p class="sub">${[t.destination, t.start_date ? `${fmtDate(t.start_date)}${t.end_date ? ` – ${fmtDate(t.end_date)}` : ''}` : ''].filter(Boolean).map(esc).join(' · ')}${t.destination || t.start_date ? ' · ' : ''}You are <b>${esc(S.me)}</b></p>
+    <header class="top">
+      <div class="row between"><button class="ghost" data-act="home">← Trips</button>${syncBadge()}</div>
+      <div class="ttl">${esc(t.name)}</div>
+      <div class="meta">${meta}${meta ? ' · ' : ''}<em>${esc(GREETING)}, ${esc(S.me)}</em></div>
+      <div class="cards2">
+        <div class="mini"><div class="k">Trip total</div><div class="v num">${money(all.total)}</div></div>
+        <div class="mini"><div class="k">Your share</div><div class="v num">${money(meRow?.share || 0)}</div></div>
+      </div>
+    </header>
     ${S.notice ? `<div class="alert">${esc(S.notice)}</div>` : ''}
     ${body}
-    ${S.tab === 'expenses' ? '<button class="fab" data-act="addExpense">+ Add expense</button>' : ''}
+    ${S.tab === 'expenses' ? '<div class="fabs"><button class="secondary" data-act="addReceipt">From a receipt</button><button data-act="addExpense">+ Add expense</button></div>' : ''}
     <nav class="tabs">
       ${[['expenses', 'Expenses'], ['balances', 'Balances'], ['settle', 'Settle up'], ['share', 'Share']]
     .map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}">${l}</button>`).join('')}
@@ -198,22 +210,34 @@ function estimateAlert(all) {
     ${Object.entries(byPayer).map(([n, l]) => `${esc(n === S.me ? 'You' : n)}: ${l.map((e) => esc(e.description)).join(', ')}`).join('<br>')}</div>`;
 }
 
-function expensesTab(all, meRow) {
-  const list = S.expenses.slice().sort((a, b) => String(b.expense_date || '').localeCompare(String(a.expense_date || '')) || String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+function expensesTab(all) {
+  const rows = [
+    ...S.expenses.map((e) => ({ kind: 'expense', e, date: e.expense_date || '', stamp: e.updated_at || '' })),
+    ...S.settlements.map((s) => ({ kind: 'payment', s, date: s.settle_date || '', stamp: s.settle_date || '' })),
+  ].sort((x, y) => String(y.date).localeCompare(String(x.date)) || String(y.stamp).localeCompare(String(x.stamp)));
   return `
-    <div class="stat-row">
-      <div class="card"><div class="label">Trip total</div><div class="big num">${money(all.total)}</div></div>
-      <div class="card"><div class="label">Your share</div><div class="big num">${money(meRow?.share || 0)}</div></div>
-    </div>
     ${estimateAlert(all)}
-    ${list.length === 0 ? '<p class="sub">Nothing yet - tap "Add expense".</p>' : list.map((e) => {
-    const mine = (all.shareByExpense[e.uid] || {})[S.me];
-    return `<button class="expense" data-act="editExpense" data-uid="${esc(e.uid)}">
-        <div class="row between"><span class="title grow">${esc(e.description)}</span><span class="num"><b>${money(e.amount_gbp)}</b></span></div>
-        <div class="row between muted"><span>${esc(fmtDate(e.expense_date))}${e.expense_date ? ' · ' : ''}${esc(e.paid_by === S.me ? 'You paid' : `${e.paid_by} paid`)}${e.category ? ` · ${esc(e.category)}` : ''}</span>
-          <span class="num">${e.orig_amount ? esc(fmtNum(e.orig_amount, e.orig_currency)) : ''}</span></div>
-        <div class="row between muted"><span>${e.gbp_estimated ? '<span class="badge">estimated £</span> ' : ''}${esc(SPLIT_LABELS[e.split_type] || '')}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}</span>
-          <span class="num">${mine != null ? `Your share ${money(mine / 100)}` : 'Not in your share'}</span></div>
+    ${rows.length === 0 ? '<p class="sub">Nothing yet - tap "Add expense".</p>' : rows.map((r) => {
+    if (r.kind === 'payment') {
+      const s = r.s;
+      return `<div class="ex pay"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} ${money(s.amount_gbp)}</p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment</p></div></div>`;
+    }
+    const e = r.e;
+    const mineP = (all.shareByExpense[e.uid] || {})[S.me];
+    const mine = mineP != null ? mineP / 100 : 0;
+    const iPaid = e.paid_by === S.me;
+    let tone = 'n'; let label = '';
+    if (iPaid) {
+      const lent = e.amount_gbp - mine;
+      if (lent > 0.004) { tone = 'g'; label = `you lent ${money(lent)}`; }
+    } else if (mine > 0.004) { tone = 'r'; label = `you borrowed ${money(mine)}`; }
+    const what = e.subtype || e.category || '';
+    return `<button class="ex" data-act="editExpense" data-uid="${esc(e.uid)}">
+        <div class="tile t${tone}"><i class="ti ti-${iconFor(e.category, e.subtype)}" aria-hidden="true"></i></div>
+        <div class="mid"><p class="t">${esc(e.description)}</p>
+          <p class="s">${esc(fmtShort(e.expense_date))}${e.expense_date ? ' · ' : ''}${esc(iPaid ? 'You paid' : `${e.paid_by} paid`)}${what ? ` · ${esc(what)}` : ''}${e.gbp_estimated ? '<span class="est">est. £</span>' : ''}</p>
+          <p class="s">${mineP != null ? `Your share ${money(mine)}` : "You're not involved"}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}</p></div>
+        <div class="amt"><b class="num">${money(e.amount_gbp)}</b>${label ? `<span class="${tone}t">${label}</span>` : ''}${e.orig_amount ? `<span class="m">${esc(fmtNum(e.orig_amount, e.orig_currency))}</span>` : ''}</div>
       </button>`;
   }).join('')}`;
 }
@@ -255,7 +279,8 @@ function shareTab() {
     <div style="height:8px"></div>
     <button class="secondary full" data-act="copyLink">Copy the link</button>
     <h2>People on this trip</h2>
-    <div class="chips">${(t.members || []).map((m) => `<span class="chip ${m === S.me ? 'on' : ''}">${esc(m)}</span>`).join('')}</div>
+    <div class="chips">${(t.members || []).map((m) => `<button type="button" class="chip ${m === S.me ? 'on' : ''}" data-act="rename" data-name="${esc(m)}">${esc(m)} ✎</button>`).join('')}</div>
+    <p class="muted">Tap a name to rename it everywhere - handy for a typo, or to change "Me" to your real name.</p>
     <div class="row" style="margin-top:10px"><input id="addPerson" placeholder="Add someone"><button data-act="addPerson">Add</button></div>
     <h2>For the desktop app</h2>
     <p class="sub">Save a file with everything in the trip, then use <b>Import trip file</b> on the desktop app. Importing it twice never duplicates anything.</p>
@@ -269,7 +294,7 @@ function blankForm() {
   const t = S.trip;
   const members = t.members || [];
   return {
-    uid: null, description: '', expense_date: todayIso(), category: '', amount_gbp: '', orig_amount: '',
+    uid: null, description: '', expense_date: todayIso(), category: '', subtype: '', amount_gbp: '', orig_amount: '',
     orig_currency: t.currency, rate: '', paid_by: S.me, split_type: 'equal',
     participants: Object.fromEntries(members.map((m) => [m, { on: true, value: '' }])),
     items: [{ description: '', amount: '', names: members.slice() }],
@@ -281,7 +306,7 @@ function formFromExpense(e) {
   const participants = Object.fromEntries(members.map((m) => [m, { on: false, value: '' }]));
   (e.participants || []).forEach((p) => { participants[p.name] = { on: true, value: p.value ?? '' }; });
   return {
-    uid: e.uid, description: e.description, expense_date: e.expense_date || '', category: e.category || '',
+    uid: e.uid, description: e.description, expense_date: e.expense_date || '', category: e.category || '', subtype: e.subtype || '',
     // An estimated pound figure isn't real - leave the box empty so it stays an estimate until typed in.
     amount_gbp: e.gbp_estimated ? '' : e.amount_gbp,
     orig_amount: e.orig_amount ?? '', orig_currency: e.orig_currency || S.trip.currency,
@@ -305,7 +330,9 @@ function formView() {
     <label>Date</label>
     <input id="f_expense_date" type="date" value="${esc(f.expense_date)}">
     <label>Category</label>
-    <select id="f_category"><option value="">(none)</option>${(t.categories || []).map((c) => `<option ${c === f.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+    <div class="cats">${CATEGORIES.map((c) => `<button type="button" class="catbtn ${f.category === c.name ? 'on' : ''}" data-act="pickCat" data-name="${esc(c.name)}"><span class="ctile"><i class="ti ti-${c.icon}" aria-hidden="true"></i></span>${esc(c.name)}</button>`).join('')}</div>
+    ${f.category && !CATEGORIES.some((c) => c.name === f.category) ? `<p class="muted">Old category: ${esc(f.category)} - pick one above to change it.</p>` : ''}
+    ${(CATEGORIES.find((c) => c.name === f.category)?.subs || []).length ? `<p class="muted" style="margin:10px 0 6px">${esc(f.category)} - what was it?</p><div class="chips">${CATEGORIES.find((c) => c.name === f.category).subs.map(([n, ic]) => `<button type="button" class="chip ${f.subtype === n ? 'on' : ''}" data-act="pickSub" data-name="${esc(n)}"><i class="ti ti-${ic}" aria-hidden="true"></i>${esc(n)}</button>`).join('')}</div>` : ''}
     <label>Amount in pounds (£) - leave empty if you only know the ${esc(t.currency)} amount</label>
     <input id="f_amount_gbp" inputmode="decimal" value="${esc(f.amount_gbp)}" placeholder="0.00">
     <label>Amount in ${esc(f.orig_currency)} (optional)</label>
@@ -316,17 +343,18 @@ function formView() {
     <label>How is it split?</label>
     <div class="seg">${Object.entries(SPLIT_LABELS).map(([k, v]) => `<button type="button" class="${f.split_type === k ? 'on' : ''}" data-act="splitType" data-type="${k}">${v}</button>`).join('')}</div>
     ${items ? `
+      <div class="card"><label style="margin-top:0">Got a receipt block from Claude? Paste it here</label>
+      <textarea id="f_paste" placeholder="Paste what Claude gave you">${esc(f.paste)}</textarea>
+      <div style="height:8px"></div><button type="button" class="secondary" data-act="usePaste">Fill in the items</button>
+      ${f.pasteMsg ? `<p class="sub">${esc(f.pasteMsg)}</p>` : ''}</div>
       <p class="sub" style="margin-top:10px">Add each item and tap who had it. Service charge, VAT or tip that the items don't cover is shared in proportion to what each person had. Skipped the service? Make the bill match the items. Item amounts are in <b>${esc(itemCur === 'GBP' ? '£' : itemCur)}</b>.</p>
       ${f.items.map((it, i) => `<div class="item">
         <div class="row"><input data-item="${i}" data-field="description" value="${esc(it.description)}" placeholder="Item"><input data-item="${i}" data-field="amount" inputmode="decimal" value="${esc(it.amount)}" placeholder="0.00" style="max-width:110px">
         <button type="button" class="danger" data-act="removeItem" data-i="${i}">✕</button></div>
         <div class="chips" style="margin-top:8px">${members.map((m) => `<button type="button" class="chip ${(it.names || []).includes(m) ? 'on' : ''}" data-act="itemWho" data-i="${i}" data-name="${esc(m)}">${esc(m)}</button>`).join('')}</div></div>`).join('')}
       <button type="button" class="secondary" data-act="addItem">+ Add item</button>
-      <div id="itemsHint" class="sub" style="margin-top:8px"></div>
-      <label>Paste from Claude (optional)</label>
-      <textarea id="f_paste" placeholder="Paste the receipt block Claude gave you">${esc(f.paste)}</textarea>
-      <div style="height:8px"></div><button type="button" class="secondary" data-act="usePaste">Fill in the items</button>
-      ${f.pasteMsg ? `<p class="sub">${esc(f.pasteMsg)}</p>` : ''}`
+      <div id="itemsHint" class="sub" style="margin-top:8px"></div>`
+
     : `
       <p class="sub" style="margin-top:10px">Who is it split between?</p>
       ${members.map((m) => `<div class="row"><label class="check grow"><input type="checkbox" data-who="${esc(m)}" ${f.participants[m]?.on ? 'checked' : ''}> ${esc(m)}</label>
@@ -368,6 +396,7 @@ function payloadFromForm() {
     description: f.description.trim(),
     expense_date: f.expense_date || null,
     category: f.category || null,
+    subtype: f.category && f.subtype ? f.subtype : null,
     paid_by: f.paid_by,
     ...amounts,
     split_type: f.split_type,
@@ -464,6 +493,40 @@ function setMe(name) {
   render();
 }
 
+async function renamePerson(oldName, newName) {
+  if ((S.trip.members || []).some((m) => m.toLowerCase() === newName.toLowerCase() && m !== oldName)) {
+    S.notice = `${newName} is already on this trip.`; render(); return;
+  }
+  const sw = (n) => (n === oldName ? newName : n);
+  const now = new Date().toISOString();
+  const batch = writeBatch(db);
+  batch.set(tripRef(), { members: (S.trip.members || []).map(sw), ...(S.trip.my_name === oldName ? { my_name: newName } : {}) }, { merge: true });
+  S.expenses.forEach((e) => {
+    const touches = e.paid_by === oldName || (e.participants || []).some((p) => p.name === oldName) || (e.items || []).some((i) => (i.names || []).includes(oldName));
+    if (!touches) return;
+    const { uid, ...rest } = e;
+    batch.set(tripRef('expenses', uid), clean({
+      ...rest, paid_by: sw(e.paid_by), updated_at: now,
+      participants: (e.participants || []).map((p) => ({ ...p, name: sw(p.name) })),
+      items: e.items ? e.items.map((i) => ({ ...i, names: (i.names || []).map(sw) })) : null,
+    }));
+  });
+  S.settlements.forEach((s) => {
+    if (s.from !== oldName && s.to !== oldName) return;
+    const { uid, ...rest } = s;
+    batch.set(tripRef('settlements', uid), clean({ ...rest, from: sw(s.from), to: sw(s.to) }));
+  });
+  fireAndForget(batch.commit());
+  if (S.me === oldName) {
+    const st = readStore();
+    st.trips[S.code] = { ...(st.trips[S.code] || {}), me: newName };
+    writeStore(st);
+    S.me = newName;
+  }
+  S.notice = `Renamed ${oldName} to ${newName}.`;
+  render();
+}
+
 async function exportFile() {
   const file = buildTripFile({ ...S.trip }, S.expenses, S.settlements, S.deleted);
   const name = `${(S.trip.name || 'trip').replace(/[^\w\- ]+/g, '').trim() || 'trip'}.trip.json`;
@@ -507,8 +570,16 @@ document.addEventListener('click', async (ev) => {
     }
     case 'tab': S.tab = d.tab; render(); window.scrollTo(0, 0); break;
     case 'addExpense': S.form = blankForm(); S.view = 'form'; render(); window.scrollTo(0, 0); updateHints(); break;
+    case 'addReceipt': S.form = { ...blankForm(), split_type: 'items' }; S.view = 'form'; render(); window.scrollTo(0, 0); updateHints(); break;
     case 'editExpense': S.form = formFromExpense(S.expenses.find((e) => e.uid === d.uid)); S.view = 'form'; render(); window.scrollTo(0, 0); updateHints(); break;
     case 'cancelForm': S.form = null; S.view = 'trip'; render(); break;
+    case 'pickCat': f.category = f.category === d.name ? '' : d.name; f.subtype = ''; render(); updateHints(); break;
+    case 'pickSub': f.subtype = f.subtype === d.name ? '' : d.name; render(); updateHints(); break;
+    case 'rename': {
+      const nn = (prompt(`Rename ${d.name} to:`, d.name) || '').trim();
+      if (nn && nn !== d.name) await renamePerson(d.name, nn);
+      break;
+    }
     case 'splitType': f.split_type = d.type; render(); updateHints(); break;
     case 'addItem': f.items.push({ description: '', amount: '', names: (S.trip.members || []).slice() }); render(); updateHints(); break;
     case 'removeItem': f.items.splice(Number(d.i), 1); if (!f.items.length) f.items.push({ description: '', amount: '', names: (S.trip.members || []).slice() }); render(); updateHints(); break;
