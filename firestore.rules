@@ -1,0 +1,15 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // A trip is reachable only by someone who knows its long random code:
+    // you can open /trips/<code> and everything under it, but nobody can
+    // list or browse all trips, and a trip itself can't be deleted.
+    match /trips/{code} {
+      allow get, create, update: if true;
+      allow list, delete: if false;
+      match /{sub}/{doc} {
+        allow read, write: if true;
+      }
+    }
+  }
+}
