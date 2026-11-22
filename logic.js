@@ -124,6 +124,7 @@ export function buildTripFile(trip, expenses, settlements, deletedUids) {
       uid: trip.uid, name: trip.name, destination: trip.destination || null, start_date: trip.start_date || null,
       end_date: trip.end_date || null, status: trip.status || 'Planning', currency: trip.currency,
       default_rate: trip.default_rate || null, notes: trip.notes || null, my_name: trip.my_name || null,
+      theme: trip.theme || null, budget_gbp: trip.budget_gbp || null,
     },
     members: trip.members || [],
     categories: trip.categories || [],
