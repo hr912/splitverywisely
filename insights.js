@@ -103,7 +103,7 @@ export function canonicalName(name, map) {
 export function combineTrips(list, map) {
   const nets = {}; const perTrip = [];
   list.forEach((t) => {
-    const all = computeAll(t.trip, t.expenses, t.settlements);
+    const all = computeAll(t.trip, t.expenses, t.settlements, t.adjustments || []);
     const row = { code: t.code, name: t.trip.name, people: [] };
     all.people.forEach((p) => {
       const c = canonicalName(p.name, map);
@@ -131,6 +131,35 @@ export function unmatchedNames(list, map) {
     names.forEach((n) => { (seen[n.toLowerCase()] ||= { name: n, trips: 0 }).trips += 1; });
   });
   return Object.values(seen).filter((x) => x.trips < list.length).map((x) => x.name);
+}
+
+// Closing a trip into another: the source trip's balances (who owes / is owed) move to the target.
+// Returns the carry-over entries for each side plus a before/after preview of the target.
+export function buildCarryOver(source, target, map) {
+  const src = computeAll(source.trip, source.expenses, source.settlements, source.adjustments || []);
+  const targetMembers = target.trip.members || [];
+  const targetName = (n) => {
+    const c = canonicalName(n, map).toLowerCase();
+    return targetMembers.find((m) => m.toLowerCase() === c) || canonicalName(n, map);
+  };
+  const moving = src.people.filter((p) => Math.abs(p.net) >= 0.005);
+  const outItems = moving.map((p) => ({ name: p.name, amount: toPounds(-toPence(p.net)) }));
+  const inItems = moving.map((p) => ({ name: targetName(p.name), amount: p.net }));
+  // two source people can map onto one target person - merge them
+  const merged = {};
+  inItems.forEach((i) => { merged[i.name] = (merged[i.name] || 0) + toPence(i.amount); });
+  const inMerged = Object.entries(merged).map(([name, pence]) => ({ name, amount: toPounds(pence) }));
+  const before = computeAll(target.trip, target.expenses, target.settlements, target.adjustments || []);
+  const entry = { items: inMerged };
+  const after = computeAll(target.trip, target.expenses, target.settlements, [...(target.adjustments || []), entry]);
+  const names = new Set([...before.people.map((p) => p.name), ...after.people.map((p) => p.name)]);
+  const preview = [...names].map((n) => ({
+    name: n,
+    before: (before.people.find((p) => p.name === n) || { net: 0 }).net,
+    after: (after.people.find((p) => p.name === n) || { net: 0 }).net,
+  })).filter((r) => Math.abs(r.before - r.after) >= 0.005);
+  const newMembers = inMerged.map((i) => i.name).filter((n) => !targetMembers.some((m) => m.toLowerCase() === n.toLowerCase()));
+  return { outItems, inItems: inMerged, preview, newMembers, empty: moving.length === 0 };
 }
 
 export function settleMessage(tripName, transfers, total) {

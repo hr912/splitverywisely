@@ -66,10 +66,12 @@ export function expenseSharesPence(e) {
   });
 }
 
-export function computeAll(trip, expenses, settlements) {
+export function computeAll(trip, expenses, settlements, adjustments = []) {
   const names = new Set(trip.members || []);
   expenses.forEach((e) => { names.add(e.paid_by); (e.participants || []).forEach((p) => names.add(p.name)); });
   settlements.forEach((s) => { names.add(s.from); names.add(s.to); });
+  const carried = {};
+  (adjustments || []).forEach((a) => (a.items || []).forEach((i) => { names.add(i.name); carried[i.name] = (carried[i.name] || 0) + toPence(i.amount); }));
   const paid = {}; const share = {}; const net = {}; const settled = {};
   names.forEach((n) => { paid[n] = 0; share[n] = 0; settled[n] = 0; });
   const byCategory = {};
@@ -95,10 +97,10 @@ export function computeAll(trip, expenses, settlements) {
     settled[s.from] = (settled[s.from] || 0) + a;
     settled[s.to] = (settled[s.to] || 0) - a;
   });
-  names.forEach((n) => { net[n] = paid[n] - share[n] + settled[n]; });
+  names.forEach((n) => { net[n] = paid[n] - share[n] + settled[n] + (carried[n] || 0); });
   return {
     people: [...names].map((n) => ({
-      name: n, paid: toPounds(paid[n]), share: toPounds(share[n]), settled: toPounds(settled[n]), net: toPounds(net[n]),
+      name: n, paid: toPounds(paid[n]), share: toPounds(share[n]), settled: toPounds(settled[n]), carried: toPounds(carried[n] || 0), net: toPounds(net[n]),
     })),
     transfers: simplifyDebts(net).map((t) => ({ from: t.from, to: t.to, amount_gbp: toPounds(t.pence) })),
     byCategory: Object.entries(byCategory).map(([name, p]) => ({ name, total: toPounds(p) })).sort((a, b) => b.total - a.total),

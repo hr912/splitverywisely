@@ -8,7 +8,7 @@ import {
   SPLIT_LABELS, clean, newCode, newUid, resolveAmounts, computeAll, buildTripFile, parseReceiptBlock, expenseSharesPence,
 } from './logic.js';
 import {
-  summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex,
+  summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex, buildCarryOver,
 } from './insights.js';
 import { CATEGORIES, iconFor } from './categories.js';
 import { THEMES, PRESET_ORDER, ICON_LIBRARY, resolveTheme, pickGreeting, applyTheme } from './theme.js';
@@ -46,9 +46,9 @@ const S = {
   view: 'home', // home | new | who | trip | form | pay | edit | activity | combo
   tab: 'expenses', // expenses | summary | balances | more
   code: null, me: null, greeting: '', themeKey: '', isOwner: false,
-  trip: null, expenses: [], settlements: [], deleted: [], activity: [],
+  trip: null, expenses: [], settlements: [], deleted: [], activity: [], adjustments: [],
   pend: { e: 0, s: 0, a: 0 }, loaded: false, missing: false,
-  form: null, pay: null, edit: null, nt: null, combo: null,
+  form: null, pay: null, edit: null, nt: null, combo: null, carry: null, adjView: null,
   error: '', notice: '',
   newMode: 'file',
 };
@@ -58,7 +58,7 @@ let unsubs = [];
 function leaveTrip() {
   unsubs.forEach((u) => u());
   unsubs = [];
-  Object.assign(S, { code: null, trip: null, expenses: [], settlements: [], deleted: [], activity: [], loaded: false, missing: false, pend: { e: 0, s: 0, a: 0 }, isOwner: false, themeKey: '' });
+  Object.assign(S, { code: null, trip: null, expenses: [], settlements: [], deleted: [], activity: [], adjustments: [], loaded: false, missing: false, pend: { e: 0, s: 0, a: 0 }, isOwner: false, themeKey: '' });
   applyTheme(THEMES.classic);
 }
 
@@ -106,6 +106,10 @@ function openTrip(code) {
     S.pend.s = snap.docs.filter((d) => d.metadata.hasPendingWrites).length;
     softRender();
   }));
+  unsubs.push(onSnapshot(collection(db, ...base, 'adjustments'), live, (snap) => {
+    S.adjustments = snap.docs.map((d) => ({ ...d.data(), uid: d.id }));
+    softRender();
+  }));
   unsubs.push(onSnapshot(collection(db, ...base, 'activity'), live, (snap) => {
     S.activity = snap.docs.map((d) => ({ ...d.data(), uid: d.id })).sort((a, b) => String(b.at).localeCompare(String(a.at)));
     S.pend.a = snap.docs.filter((d) => d.metadata.hasPendingWrites).length;
@@ -141,7 +145,7 @@ function logActivity(text, kind, code = S.code, by = S.me) {
 // ---------------------------------------------------------------- rendering
 function softRender() { if (!FORM_VIEWS.includes(S.view)) render(); }
 function render() {
-  const views = { home: homeView, new: newView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView };
+  const views = { home: homeView, new: newView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView, carry: carryView, adj: adjView };
   $app.innerHTML = (views[S.view] || tripView)();
 }
 
@@ -254,7 +258,7 @@ function tripView() {
   if (S.missing || !S.trip) return missingView();
   const t = S.trip;
   const th = resolveTheme(t.theme);
-  const all = computeAll(t, S.expenses, S.settlements);
+  const all = computeAll(t, S.expenses, S.settlements, S.adjustments);
   const meRow = all.people.find((p) => p.name === S.me);
   const body = S.tab === 'summary' ? summaryTab(all) : S.tab === 'balances' ? balancesTab(all) : S.tab === 'more' ? moreTab() : expensesTab(all);
   const meta = [t.destination, fmtRange(t.start_date, t.end_date)].filter(Boolean).map(esc).join(' · ');
@@ -273,6 +277,7 @@ function tripView() {
     </header>
     ${S.notice ? `<div class="alert">${esc(S.notice)}</div>` : ''}
     ${S.error ? `<p class="error">${esc(S.error)}</p>` : ''}
+    ${carryBanner(all)}
     ${body}
     ${S.tab === 'expenses' ? '<div class="fabs"><button class="secondary" data-act="addReceipt">From a receipt</button><button data-act="addExpense">+ Add expense</button></div>' : ''}
     <nav class="tabs">
@@ -298,6 +303,7 @@ function expensesTab(all) {
   const rows = [
     ...S.expenses.map((e) => ({ kind: 'expense', e, date: e.expense_date || '', added: added(e) })),
     ...S.settlements.map((s) => ({ kind: 'payment', s, date: s.settle_date || '', added: added(s) })),
+    ...S.adjustments.map((a) => ({ kind: 'carry', a, date: a.date || '', added: added(a) })),
   ].sort((x, y) => (sortMode === 'added'
     ? String(y.added).localeCompare(String(x.added))
     : String(y.date).localeCompare(String(x.date)) || String(y.added).localeCompare(String(x.added))));
@@ -305,6 +311,10 @@ function expensesTab(all) {
     ${estimateAlert(all)}
     <div class="seg small" style="margin:6px 0"><button class="${sortMode === 'date' ? 'on' : ''}" data-act="sort" data-mode="date">By date</button><button class="${sortMode === 'added' ? 'on' : ''}" data-act="sort" data-mode="added">By when added</button></div>
     ${rows.length === 0 ? '<p class="sub">Nothing yet - tap "Add expense".</p>' : rows.map((r) => {
+    if (r.kind === 'carry') {
+      const a = r.a;
+      return `<button class="ex pay" data-act="openAdj" data-uid="${esc(a.uid)}"><div class="tile tn"><i class="ti ti-arrows-exchange" aria-hidden="true"></i></div><div class="mid"><p class="t">${esc(a.label)}</p><p class="s">${esc(fmtShort(a.date))}${a.date ? ' · ' : ''}Balances only - no cost${a.kind === 'in' ? ' · tap to see' : ''}</p></div></button>`;
+    }
     if (r.kind === 'payment') {
       const s = r.s;
       return `<button class="ex pay" data-act="editPayment" data-uid="${esc(s.uid)}"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} <b>${money(s.amount_gbp)}</b></p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment${s.notes ? ` · ${esc(s.notes)}` : ''}</p></div></button>`;
@@ -397,7 +407,7 @@ function balancesTab(all) {
     <h2>Who owes what</h2>
     ${all.people.map((p) => `<div class="card"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)}</b>
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
-      <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}</div></div>`).join('')}
+      <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}${Math.abs(p.carried) > 0.004 ? ` · Carried over ${p.carried > 0 ? '+' : '-'}${money(Math.abs(p.carried))}` : ''}</div></div>`).join('')}
     <h2>Settle up</h2>
     <p class="sub">The fewest payments that clear everything, always in pounds. Someone paid a different amount? Use "Record a payment".</p>
     ${all.transfers.length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : all.transfers.map((t) => `
@@ -428,6 +438,7 @@ function moreTab() {
     <div class="menu">
       <button data-act="openActivity"><i class="ti ti-bell" aria-hidden="true"></i><span>Activity<small>Everything that changed, and who changed it</small></span></button>
       <button data-act="editTrip"><i class="ti ti-pencil" aria-hidden="true"></i><span>Edit trip<small>Name, dates, currency, rate, budget and theme</small></span></button>
+      <button data-act="openCarry"><i class="ti ti-arrow-big-right-lines" aria-hidden="true"></i><span>Settle this trip into another trip<small>Close it and move who-owes-what to another trip</small></span></button>
       <button data-act="openCombo"><i class="ti ti-arrows-exchange" aria-hidden="true"></i><span>Settle several trips together<small>Add up balances across trips, e.g. Naples and Oxford</small></span></button>
       <button data-act="exportFile"><i class="ti ti-download" aria-hidden="true"></i><span>Save trip file<small>For the desktop app - also a handy backup</small></span></button>
     </div>
@@ -809,7 +820,7 @@ async function exportFile() {
 
 async function deleteEverything(code) {
   const batches = [];
-  for (const sub of ['expenses', 'settlements', 'deleted', 'activity']) {
+  for (const sub of ['expenses', 'settlements', 'deleted', 'activity', 'adjustments']) {
     const snap = await getDocs(collection(db, 'trips', code, sub));
     let b = writeBatch(db); let n = 0;
     snap.docs.forEach((d) => { b.delete(d.ref); n += 1; if (n === 400) { batches.push(b); b = writeBatch(db); n = 0; } });
@@ -843,6 +854,93 @@ async function claimOwner() {
   fireAndForget(setDoc(tripRef(), { owner_hash: owner.hash }, { merge: true }));
   S.notice = 'You are now the creator of this trip.';
   render();
+}
+
+// ---------------------------------------------------------------- settle one trip into another
+function carryBanner(all) {
+  const out = S.adjustments.find((a) => a.kind === 'out');
+  if (!out) return '';
+  const stillOwed = all.people.some((p) => Math.abs(p.net) > 0.005);
+  return `<div class="alert" style="background:var(--accent-soft);color:var(--ink)"><b>Settled into ${esc(out.other_name)}</b> on ${esc(fmtShort(out.date))}. Who owes what now lives there.${stillOwed ? ' <b>Something changed here since then</b> - undo the carry-over (tap it in the log) and do it again.' : ''}</div>`;
+}
+
+function carryView() {
+  const c = S.carry;
+  const others = Object.entries(readStore().trips).filter(([code]) => code !== S.code);
+  if (c.step === 'pick') {
+    return `
+      <div class="topbar"><button class="ghost" data-act="carryBack">← Back</button></div>
+      <h1>Settle this trip into another</h1>
+      <p class="sub">"${esc(S.trip.name)}" becomes settled - everyone shows as all square. Who owes whom moves to the trip you pick, so that trip shows the real, current situation. Neither trip's costs change.</p>
+      ${others.length === 0 ? '<p class="sub">You need another trip on this phone first.</p>' : others.map(([code, t]) => `<button class="ex" data-act="carryPick" data-code="${esc(code)}"><div class="mid"><p class="t">${esc(t.name || code)}</p><p class="s">Move the balances here</p></div></button>`).join('')}
+      ${c.error ? `<p class="error">${esc(c.error)}</p>` : ''}`;
+  }
+  if (!c.loaded) return '<p class="loading">Loading…</p>';
+  const r = c.result;
+  return `
+    <div class="topbar"><button class="ghost" data-act="carryBack">← Choose another trip</button></div>
+    <h1>Check before you confirm</h1>
+    <p class="sub"><b>${esc(S.trip.name)}</b> → <b>${esc(c.target.trip.name)}</b></p>
+    ${r.empty ? '<p class="sub">Nobody owes anything on this trip, so there is nothing to move.</p>' : `
+    <h2>${esc(S.trip.name)} afterwards</h2>
+    <p class="sub">Everyone all square. These amounts move out:</p>
+    ${r.outItems.map((i) => `<div class="row between muted"><span>${esc(i.name)}</span><span class="num">${esc(bal(-i.amount))}</span></div>`).join('')}
+    <h2>${esc(c.target.trip.name)} afterwards</h2>
+    ${r.preview.map((p) => `<div class="card"><b>${esc(p.name)}</b><div class="row between"><span class="muted num">${esc(bal(p.before))}</span><span>→</span><b class="num">${esc(bal(p.after))}</b></div></div>`).join('')}
+    ${r.newMembers.length ? `<p class="muted">New to ${esc(c.target.trip.name)}, and added: ${esc(r.newMembers.join(', '))}</p>` : ''}
+    <p class="sub">You can undo this later by tapping the "balance carried over" line in the log.</p>
+    <button class="full" data-act="carryGo">Settle ${esc(S.trip.name)} into ${esc(c.target.trip.name)}</button>`}
+    ${c.error ? `<p class="error">${esc(c.error)}</p>` : ''}`;
+}
+const bal = (n) => (Math.abs(n) < 0.005 ? 'All square' : n > 0 ? `is owed ${money(n)}` : `owes ${money(-n)}`);
+
+async function loadCarryTarget(code) {
+  const c = S.carry; c.loaded = false; c.error = ''; c.targetCode = code; render();
+  try {
+    const [t, e, s, j] = await Promise.all([getDoc(doc(db, 'trips', code)), getDocs(collection(db, 'trips', code, 'expenses')), getDocs(collection(db, 'trips', code, 'settlements')), getDocs(collection(db, 'trips', code, 'adjustments'))]);
+    if (!t.exists || (typeof t.exists === 'function' && !t.exists())) throw new Error('That trip can\'t be found.');
+    c.target = { trip: t.data(), expenses: e.docs.map((d) => ({ ...d.data(), uid: d.id })), settlements: s.docs.map((d) => ({ ...d.data(), uid: d.id })), adjustments: j.docs.map((d) => ({ ...d.data(), uid: d.id })) };
+    c.result = buildCarryOver({ trip: S.trip, expenses: S.expenses, settlements: S.settlements, adjustments: S.adjustments }, c.target, readStore().nameMap);
+    c.step = 'preview';
+  } catch (err) { c.error = `Couldn't load: ${err.message}`; c.step = 'pick'; }
+  c.loaded = true; render();
+}
+
+function doCarry() {
+  const c = S.carry; const r = c.result;
+  if (r.empty) return;
+  const id = newUid(); const now = new Date().toISOString(); const date = todayIso();
+  const batch = writeBatch(db);
+  batch.set(refFor(S.code, 'adjustments', id), clean({ label: `Settled into ${c.target.trip.name}`, kind: 'out', other_code: c.targetCode, other_name: c.target.trip.name, date, created_at: now, by: S.me, items: r.outItems }));
+  batch.set(refFor(c.targetCode, 'adjustments', id), clean({ label: `Balance carried over from ${S.trip.name}`, kind: 'in', other_code: S.code, other_name: S.trip.name, date, created_at: now, by: S.me, items: r.inItems }));
+  if (r.newMembers.length) batch.set(refFor(c.targetCode), { members: arrayUnion(...r.newMembers) }, { merge: true });
+  fireAndForget(batch.commit());
+  logActivity(activityLine('carry', S.me, `settled this trip into ${c.target.trip.name}`), 'carry');
+  logActivity(activityLine('carry', S.me, `carried over the balances from ${S.trip.name}`), 'carry', c.targetCode);
+  S.carry = null; S.view = 'trip'; S.tab = 'balances';
+  S.notice = `${S.trip.name} is settled. Its balances now live in ${c.target.trip.name}.`;
+  render();
+}
+
+function adjView() {
+  const a = S.adjView;
+  return `
+    <div class="topbar"><button class="ghost" data-act="back">← Back</button></div>
+    <h1>${esc(a.label)}</h1>
+    <p class="sub">${esc(fmtShort(a.date))} · Only changes who owes whom - it is not a cost, so no trip total changes.</p>
+    ${(a.items || []).map((i) => `<div class="card row between"><b>${esc(i.name)}</b><span class="num ${i.amount >= 0 ? 'pos' : 'neg'}">${i.amount >= 0 ? 'is owed ' : 'owes '}${money(Math.abs(i.amount))}</span></div>`).join('')}
+    <button class="danger full" data-act="undoAdj">Undo this (in both trips)</button>`;
+}
+
+function undoAdj() {
+  const a = S.adjView;
+  if (!confirm('Undo this? The balances go back to how they were in both trips.')) return;
+  const batch = writeBatch(db);
+  batch.delete(refFor(S.code, 'adjustments', a.uid));
+  if (a.other_code) batch.delete(refFor(a.other_code, 'adjustments', a.uid));
+  fireAndForget(batch.commit());
+  logActivity(activityLine('carry', S.me, 'undid a balance carry-over'), 'carry');
+  S.adjView = null; S.view = 'trip'; render();
 }
 
 // ---------------------------------------------------------------- combined settle-up
@@ -887,9 +985,9 @@ async function loadCombo() {
   render();
   try {
     for (const code of c.selected) {
-      const [t, e, s] = await Promise.all([getDoc(doc(db, 'trips', code)), getDocs(collection(db, 'trips', code, 'expenses')), getDocs(collection(db, 'trips', code, 'settlements'))]);
+      const [t, e, s, j] = await Promise.all([getDoc(doc(db, 'trips', code)), getDocs(collection(db, 'trips', code, 'expenses')), getDocs(collection(db, 'trips', code, 'settlements')), getDocs(collection(db, 'trips', code, 'adjustments'))]);
       if (!t.exists || (typeof t.exists === 'function' && !t.exists())) continue;
-      c.data[code] = { trip: t.data(), expenses: e.docs.map((d) => ({ ...d.data(), uid: d.id })), settlements: s.docs.map((d) => ({ ...d.data(), uid: d.id })) };
+      c.data[code] = { trip: t.data(), expenses: e.docs.map((d) => ({ ...d.data(), uid: d.id })), settlements: s.docs.map((d) => ({ ...d.data(), uid: d.id })), adjustments: j.docs.map((d) => ({ ...d.data(), uid: d.id })) };
     }
   } catch (err) { c.error = `Couldn't load: ${err.message}`; }
   c.loaded = true; c.step = 'result';
@@ -990,7 +1088,7 @@ document.addEventListener('click', async (ev) => {
       S.pay = null; S.view = 'trip'; render(); break;
     }
     case 'whatsapp': {
-      const all = computeAll(S.trip, S.expenses, S.settlements);
+      const all = computeAll(S.trip, S.expenses, S.settlements, S.adjustments);
       const text = settleMessage(S.trip.name, all.transfers, all.total);
       if (navigator.share) { try { await navigator.share({ text }); } catch { /* cancelled */ } } else { try { await navigator.clipboard.writeText(text); S.notice = 'Copied - paste it into your group chat.'; } catch { S.notice = text; } render(); }
       break;
@@ -1029,6 +1127,12 @@ document.addEventListener('click', async (ev) => {
       if (v !== null) patchStore((s) => { if (Number(v) > 0) s.budgets[S.code] = Number(v); else delete s.budgets[S.code]; });
       render(); break;
     }
+    case 'openCarry': S.carry = { step: 'pick', loaded: true, error: '' }; S.view = 'carry'; render(); window.scrollTo(0, 0); break;
+    case 'carryBack': if (S.carry.step === 'preview') { S.carry.step = 'pick'; render(); } else { S.carry = null; S.view = 'trip'; render(); } break;
+    case 'carryPick': await loadCarryTarget(d.code); break;
+    case 'carryGo': doCarry(); break;
+    case 'openAdj': S.adjView = S.adjustments.find((x) => x.uid === d.uid); S.view = 'adj'; render(); break;
+    case 'undoAdj': undoAdj(); break;
     case 'claimOwner': await claimOwner(); break;
     case 'deleteTrip': await deleteTrip(); break;
     case 'openCombo': S.combo = { step: 'pick', selected: S.code ? [S.code] : [], data: {}, loaded: false, error: '' }; S.view = 'combo'; render(); break;
