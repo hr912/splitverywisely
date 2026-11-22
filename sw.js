@@ -1,11 +1,12 @@
 // Keeps the app opening with no signal. The shell files are cached; the
 // Firebase scripts are cached the first time they load. Trip data itself is
 // kept offline by Firestore, not here.
-const VERSION = 'svw-5';
+const VERSION = 'svw-6';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'trip-math.js', 'logic.js', 'categories.js', 'theme.js', 'insights.js', 'firebase-config.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // 'reload' skips the browser's own 10-minute cache, so a new version never installs stale files.
+  e.waitUntil(caches.open(VERSION).then((c) => Promise.all(SHELL.map((u) => c.add(new Request(u, { cache: 'reload' }))))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', (e) => {
   e.waitUntil(
@@ -30,8 +31,9 @@ self.addEventListener('fetch', (e) => {
     })));
     return;
   }
+  // 'no-cache' = always ask the server whether the file changed (cheap), instead of trusting the 10-minute cache.
   e.respondWith(
-    fetch(req).then((res) => {
+    fetch(req.url, { cache: 'no-cache' }).then((res) => {
       const copy = res.clone();
       caches.open(VERSION).then((c) => c.put(req, copy));
       return res;
