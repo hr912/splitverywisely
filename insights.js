@@ -12,15 +12,20 @@ const isoAdd = (iso, days) => {
 };
 const daysBetween = (a, b) => Math.round((new Date(`${b}T12:00:00Z`) - new Date(`${a}T12:00:00Z`)) / 86400000);
 
-// Summary page numbers. `today` is an ISO date (pinned in tests).
-export function summarize(trip, expenses, all, today) {
+// Summary page numbers. `today` is an ISO date (pinned in tests). `who` = null for the whole group, or
+// a person's name to see just THEIR share of everything (what they actually spent).
+export function summarize(trip, expenses, all, today, who = null) {
   const start = trip.start_date || null;
   const end = trip.end_date || start;
+  const amtOf = (e) => (who ? ((all.shareByExpense[e.uid] || {})[who] || 0) : toPence(e.amount_gbp));
   const days = [];
   let before = 0; let after = 0; let inTrip = 0;
-  const perDay = {};
+  const perDay = {}; const cats = {};
   expenses.forEach((e) => {
-    const amt = toPence(e.amount_gbp);
+    const amt = amtOf(e);
+    if (!(amt > 0)) return;
+    const c = e.category || 'Uncategorised';
+    cats[c] = (cats[c] || 0) + amt;
     const d = e.expense_date || null;
     if (start && (!d || d < start)) { before += amt; return; }
     if (start && end && d > end) { after += amt; return; }
@@ -42,13 +47,13 @@ export function summarize(trip, expenses, all, today) {
     const elapsed = daysBetween(start, today) + 1;
     if (elapsed >= 1 && elapsed < dayCount) dayCount = elapsed; // trip still running
   }
-  const withIdx = expenses.map((e) => ({ uid: e.uid, description: e.description, amount: e.amount_gbp, category: e.category, subtype: e.subtype, date: e.expense_date }));
+  const withIdx = expenses.map((e) => ({ uid: e.uid, description: e.description, amount: toPounds(amtOf(e)), category: e.category, subtype: e.subtype, date: e.expense_date })).filter((x) => x.amount > 0);
   return {
-    byCategory: all.byCategory,
+    byCategory: Object.entries(cats).map(([name, p]) => ({ name, total: toPounds(p) })).sort((x, y) => y.total - x.total),
     days, before: toPounds(before), after: toPounds(after),
     inTrip: toPounds(inTrip),
     avgPerDay: toPounds(Math.round(inTrip / dayCount)),
-    biggest: withIdx.sort((a, b) => b.amount - a.amount).slice(0, 3),
+    biggest: withIdx.sort((x, y) => y.amount - x.amount).slice(0, 3),
     paidVsShare: all.people.map((p) => ({ name: p.name, paid: p.paid, share: p.share })),
   };
 }
@@ -182,4 +187,82 @@ export async function sha256Hex(text) {
   const bytes = new TextEncoder().encode(text);
   const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// "Just me" extras: what you covered for others, what others covered for you, and how much of your share is still estimated.
+export function coverage(me, expenses, all) {
+  let forOthers = 0; let byOthers = 0; let estimated = 0;
+  expenses.forEach((e) => {
+    const mine = (all.shareByExpense[e.uid] || {})[me] || 0;
+    const amt = toPence(e.amount_gbp);
+    if (e.paid_by === me) forOthers += Math.max(0, amt - mine); else byOthers += mine;
+    if (e.gbp_estimated) estimated += mine;
+  });
+  return { forOthers: toPounds(forOthers), byOthers: toPounds(byOthers), estimated: toPounds(estimated) };
+}
+
+// Pace and forecast while the trip is running (null before it starts or once it has ended).
+export function paceInfo(sm, trip, today, budget) {
+  const start = trip.start_date; const end = trip.end_date || start;
+  if (!start || !end || !today) return null;
+  const tripDays = daysBetween(start, end) + 1;
+  const elapsed = daysBetween(start, today) + 1;
+  if (elapsed < 1 || elapsed > tripDays) return null;
+  const daily = sm.inTrip / elapsed;
+  const projected = sm.before + daily * tripDays;
+  const b = Number(budget) > 0 ? Number(budget) : null;
+  const r2 = (n) => Math.round(n * 100) / 100;
+  return { daily: r2(daily), projected: r2(projected), tripDays, elapsed, budget: b, over: b ? projected > b : false };
+}
+
+export function todayLine(expenses, all, me, today) {
+  const todays = expenses.filter((e) => e.expense_date === today);
+  if (!todays.length) return null;
+  let total = 0; let mine = 0;
+  todays.forEach((e) => { total += toPence(e.amount_gbp); mine += (all.shareByExpense[e.uid] || {})[me] || 0; });
+  return { total: toPounds(total), mine: toPounds(mine) };
+}
+
+// Search + filters on the Expenses list. rows: [{kind:'expense'|'payment'|'carry', e|s|a}]
+export function filterRows(rows, flt, me, all) {
+  const q = String(flt.q || '').trim().toLowerCase();
+  if (!(q || flt.who || flt.cat || flt.mine)) return rows;
+  return rows.filter((r) => {
+    if (r.kind === 'carry') return false;
+    if (r.kind === 'payment') {
+      if (q || flt.cat) return false;
+      if (flt.who && r.s.from !== flt.who && r.s.to !== flt.who) return false;
+      if (flt.mine && r.s.from !== me && r.s.to !== me) return false;
+      return true;
+    }
+    const e = r.e;
+    if (flt.who && e.paid_by !== flt.who) return false;
+    if (flt.cat && (e.category || '') !== flt.cat) return false;
+    if (flt.mine && !(((all.shareByExpense[e.uid] || {})[me] || 0) > 0) && e.paid_by !== me) return false;
+    if (q) {
+      const hay = [e.description, e.category, e.subtype, e.paid_by, e.notes].filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+// Facts for the one-page trip summary.
+export function buildRecap(trip, expenses, all, who, today) {
+  const sm = summarize(trip, expenses, all, today, who);
+  const meRow = who ? all.people.find((p) => p.name === who) : null;
+  const total = who ? (meRow ? meRow.share : 0) : all.total;
+  const dayRows = sm.days.filter((d) => d.total > 0).sort((x, y) => y.total - x.total);
+  const people = all.people.filter((p) => p.paid > 0 || p.share > 0);
+  const tripDays = Math.max(1, sm.days.length);
+  const r2 = (n) => Math.round(n * 100) / 100;
+  return {
+    sm, total, count: expenses.length, people,
+    topCategory: sm.byCategory[0] || null,
+    priciestDay: dayRows[0] || null,
+    priciest: sm.biggest[0] || null,
+    perPersonPerDay: people.length ? r2(all.total / people.length / tripDays) : 0,
+    settled: all.transfers.length === 0,
+    transfers: all.transfers,
+  };
 }

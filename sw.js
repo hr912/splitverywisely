@@ -1,7 +1,7 @@
 // Keeps the app opening with no signal. The shell files are cached; the
 // Firebase scripts are cached the first time they load. Trip data itself is
 // kept offline by Firestore, not here.
-const VERSION = 'svw-6';
+const VERSION = 'svw-7';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'trip-math.js', 'logic.js', 'categories.js', 'theme.js', 'insights.js', 'firebase-config.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -19,7 +19,7 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   const isShell = url.origin === location.origin;
-  const isSdk = (url.hostname === 'www.gstatic.com' && url.pathname.startsWith('/firebasejs/')) || (url.hostname === 'cdn.jsdelivr.net' && url.pathname.startsWith('/npm/@tabler/icons-webfont@'));
+  const isSdk = (url.hostname === 'www.gstatic.com' && url.pathname.startsWith('/firebasejs/')) || (url.hostname === 'cdn.jsdelivr.net' && url.pathname.startsWith('/npm/@tabler/icons-webfont@')) || (url.hostname === 'cdnjs.cloudflare.com' && url.pathname.startsWith('/ajax/libs/html2canvas/'));
   if (!isShell && !isSdk) return; // Firestore traffic etc. is left alone
   // Network first for our own files (so updates arrive), cache when offline;
   // the pinned SDK files never change, so cache first.

@@ -9,6 +9,7 @@ import {
 } from './logic.js';
 import {
   summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex, buildCarryOver,
+  coverage, paceInfo, todayLine, filterRows, buildRecap,
 } from './insights.js';
 import { CATEGORIES, iconFor } from './categories.js';
 import { THEMES, PRESET_ORDER, ICON_LIBRARY, resolveTheme, pickGreeting, applyTheme } from './theme.js';
@@ -48,7 +49,8 @@ const S = {
   code: null, me: null, greeting: '', themeKey: '', isOwner: false,
   trip: null, expenses: [], settlements: [], deleted: [], activity: [], adjustments: [],
   pend: { e: 0, s: 0, a: 0 }, loaded: false, missing: false,
-  form: null, pay: null, edit: null, nt: null, combo: null, carry: null, adjView: null,
+  form: null, pay: null, edit: null, nt: null, combo: null, carry: null, adjView: null, person: null, noteForm: null, notes: [], deletedMap: {},
+  flt: { q: '', who: '', cat: '', mine: false, open: false },
   error: '', notice: '',
   newMode: 'file',
 };
@@ -58,7 +60,7 @@ let unsubs = [];
 function leaveTrip() {
   unsubs.forEach((u) => u());
   unsubs = [];
-  Object.assign(S, { code: null, trip: null, expenses: [], settlements: [], deleted: [], activity: [], adjustments: [], loaded: false, missing: false, pend: { e: 0, s: 0, a: 0 }, isOwner: false, themeKey: '' });
+  Object.assign(S, { code: null, trip: null, expenses: [], settlements: [], deleted: [], activity: [], adjustments: [], notes: [], deletedMap: {}, loaded: false, missing: false, pend: { e: 0, s: 0, a: 0 }, isOwner: false, themeKey: '' });
   applyTheme(THEMES.classic);
 }
 
@@ -115,7 +117,15 @@ function openTrip(code) {
     S.pend.a = snap.docs.filter((d) => d.metadata.hasPendingWrites).length;
     softRender();
   }));
-  unsubs.push(onSnapshot(collection(db, ...base, 'deleted'), (snap) => { S.deleted = snap.docs.map((d) => d.id); }));
+  unsubs.push(onSnapshot(collection(db, ...base, 'deleted'), (snap) => {
+    S.deleted = snap.docs.map((d) => d.id);
+    S.deletedMap = Object.fromEntries(snap.docs.map((d) => [d.id, d.data()]));
+    softRender();
+  }));
+  unsubs.push(onSnapshot(collection(db, ...base, 'notes'), (snap) => {
+    S.notes = snap.docs.map((d) => ({ ...d.data(), uid: d.id }));
+    softRender();
+  }));
   render();
 }
 
@@ -138,14 +148,14 @@ const tripRef = (...p) => doc(db, 'trips', S.code, ...p);
 const refFor = (code, ...p) => doc(db, 'trips', code, ...p);
 const fireAndForget = (p) => p.catch((err) => { S.error = `Couldn't save: ${err.message}`; render(); });
 
-function logActivity(text, kind, code = S.code, by = S.me) {
-  fireAndForget(setDoc(refFor(code, 'activity', newUid()), clean({ at: new Date().toISOString(), by, kind, text })));
+function logActivity(text, kind, code = S.code, by = S.me, extra = {}) {
+  fireAndForget(setDoc(refFor(code, 'activity', newUid()), clean({ at: new Date().toISOString(), by, kind, text, ...extra })));
 }
 
 // ---------------------------------------------------------------- rendering
-function softRender() { if (!FORM_VIEWS.includes(S.view)) render(); }
+function softRender() { if (!FORM_VIEWS.includes(S.view) && !(S.view === 'info' && S.noteForm)) render(); }
 function render() {
-  const views = { home: homeView, new: newView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView, carry: carryView, adj: adjView };
+  const views = { home: homeView, new: newView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView, carry: carryView, adj: adjView, info: infoView, person: personView, recap: recapView };
   $app.innerHTML = (views[S.view] || tripView)();
 }
 
@@ -267,7 +277,7 @@ function tripView() {
     <header class="top">
       ${th.stripe.length ? `<div class="stripe">${th.stripe.map((c) => `<span style="background:${c}"></span>`).join('')}</div>` : ''}
       <div class="row between"><button class="ghost" data-act="home">← Trips</button>
-        <span class="row">${syncBadge()}<button class="bell" data-act="openActivity" aria-label="Activity"><i class="ti ti-bell" aria-hidden="true"></i>${un ? `<span class="dotn">${un > 9 ? '9+' : un}</span>` : ''}</button></span></div>
+        <span class="row">${syncBadge()}<button class="bell" data-act="openInfo" aria-label="Trip info"><i class="ti ti-info-circle" aria-hidden="true"></i></button><button class="bell" data-act="openActivity" aria-label="Activity"><i class="ti ti-bell" aria-hidden="true"></i>${un ? `<span class="dotn">${un > 9 ? '9+' : un}</span>` : ''}</button></span></div>
       <div class="ttl">${esc(t.name)}</div>
       <div class="meta">${meta}${meta ? ' · ' : ''}<em>${esc(S.greeting)}, ${esc(S.me)}</em></div>
       <div class="cards2">
@@ -297,50 +307,88 @@ function estimateAlert(all) {
     ${Object.keys(byPayer).length ? `<div style="margin-top:8px">Waiting for: ${Object.entries(byPayer).map(([n, l]) => `${esc(n)} (${l.map((e) => esc(e.description)).join(', ')})`).join('; ')}</div>` : ''}</div>`;
 }
 
-function expensesTab(all) {
+function rowsFor(all) {
   const sortMode = readStore().prefs.sortMode;
   const added = (x) => String(x.created_at || x.updated_at || x.settle_date || '');
   const rows = [
     ...S.expenses.map((e) => ({ kind: 'expense', e, date: e.expense_date || '', added: added(e) })),
     ...S.settlements.map((s) => ({ kind: 'payment', s, date: s.settle_date || '', added: added(s) })),
-    ...S.adjustments.map((a) => ({ kind: 'carry', a, date: a.date || '', added: added(a) })),
+    ...S.adjustments.map((x) => ({ kind: 'carry', a: x, date: x.date || '', added: added(x) })),
   ].sort((x, y) => (sortMode === 'added'
     ? String(y.added).localeCompare(String(x.added))
     : String(y.date).localeCompare(String(x.date)) || String(y.added).localeCompare(String(x.added))));
+  return filterRows(rows, S.flt, S.me, all);
+}
+
+function rowHtml(r, all) {
+  if (r.kind === 'carry') {
+    const x = r.a;
+    return `<button class="ex pay" data-act="openAdj" data-uid="${esc(x.uid)}"><div class="tile tn"><i class="ti ti-arrows-exchange" aria-hidden="true"></i></div><div class="mid"><p class="t">${esc(x.label)}</p><p class="s">${esc(fmtShort(x.date))}${x.date ? ' · ' : ''}Balances only - no cost${x.kind === 'in' ? ' · tap to see' : ''}</p></div></button>`;
+  }
+  if (r.kind === 'payment') {
+    const s = r.s;
+    return `<button class="ex pay" data-act="editPayment" data-uid="${esc(s.uid)}"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} <b>${money(s.amount_gbp)}</b></p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment${s.notes ? ` · ${esc(s.notes)}` : ''}</p></div></button>`;
+  }
+  const e = r.e;
+  const mineP = (all.shareByExpense[e.uid] || {})[S.me];
+  const mine = mineP != null ? mineP / 100 : 0;
+  const iPaid = e.paid_by === S.me;
+  let tone = 'n'; let label = '';
+  if (iPaid) {
+    const lent = e.amount_gbp - mine;
+    if (lent > 0.004) { tone = 'g'; label = `you lent ${money(lent)}`; }
+  } else if (mine > 0.004) { tone = 'r'; label = `you borrowed ${money(mine)}`; }
+  const what = e.subtype || e.category || '';
+  return `<button class="ex" data-act="editExpense" data-uid="${esc(e.uid)}">
+      <div class="tile t${tone}"><i class="ti ti-${iconFor(e.category, e.subtype)}" aria-hidden="true"></i></div>
+      <div class="mid"><p class="t">${esc(e.description)}</p>
+        <p class="s">${esc(fmtShort(e.expense_date))}${e.expense_date ? ' · ' : ''}${esc(iPaid ? 'You paid' : `${e.paid_by} paid`)}${what ? ` · ${esc(what)}` : ''}${e.gbp_estimated ? '<span class="est">est. £</span>' : ''}</p>
+        <p class="s">${mineP != null ? `Your share ${money(mine)}` : "You're not involved"}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}</p></div>
+      <div class="amt"><b class="num">${money(e.amount_gbp)}</b>${label ? `<span class="${tone}t">${label}</span>` : ''}${e.orig_amount ? `<span class="m">${esc(fmtNum(e.orig_amount, e.orig_currency))}</span>` : ''}</div>
+    </button>`;
+}
+
+const filterActive = () => !!(S.flt.q || S.flt.who || S.flt.cat || S.flt.mine);
+function listHtml(all) {
+  const rows = rowsFor(all);
+  if (rows.length === 0) return filterActive() ? '<p class="sub">Nothing matches. Try clearing the search or filters.</p>' : '<p class="sub">Nothing yet - tap "Add expense".</p>';
+  return rows.map((r) => rowHtml(r, all)).join('');
+}
+function countText(all) {
+  if (!filterActive()) return '';
+  const n = rowsFor(all).length;
+  return `Showing ${n} of ${S.expenses.length + S.settlements.length}`;
+}
+function refreshList() {
+  const el = document.getElementById('explist');
+  if (!el || !S.trip) return;
+  const all = computeAll(S.trip, S.expenses, S.settlements, S.adjustments);
+  el.innerHTML = listHtml(all);
+  const c = document.getElementById('fltcount');
+  if (c) c.textContent = countText(all);
+}
+
+function expensesTab(all) {
+  const sortMode = readStore().prefs.sortMode;
+  const today = todayLine(S.expenses, all, S.me, todayIso());
+  const f = S.flt;
+  const cats = [...new Set([...CATEGORIES.map((c) => c.name), ...S.expenses.map((e) => e.category).filter(Boolean)])];
+  const people = [...new Set([...(S.trip.members || []), ...S.expenses.map((e) => e.paid_by)])];
   return `
     ${estimateAlert(all)}
-    <div class="seg small" style="margin:6px 0"><button class="${sortMode === 'date' ? 'on' : ''}" data-act="sort" data-mode="date">By date</button><button class="${sortMode === 'added' ? 'on' : ''}" data-act="sort" data-mode="added">By when added</button></div>
-    ${rows.length === 0 ? '<p class="sub">Nothing yet - tap "Add expense".</p>' : rows.map((r) => {
-    if (r.kind === 'carry') {
-      const a = r.a;
-      return `<button class="ex pay" data-act="openAdj" data-uid="${esc(a.uid)}"><div class="tile tn"><i class="ti ti-arrows-exchange" aria-hidden="true"></i></div><div class="mid"><p class="t">${esc(a.label)}</p><p class="s">${esc(fmtShort(a.date))}${a.date ? ' · ' : ''}Balances only - no cost${a.kind === 'in' ? ' · tap to see' : ''}</p></div></button>`;
-    }
-    if (r.kind === 'payment') {
-      const s = r.s;
-      return `<button class="ex pay" data-act="editPayment" data-uid="${esc(s.uid)}"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} <b>${money(s.amount_gbp)}</b></p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment${s.notes ? ` · ${esc(s.notes)}` : ''}</p></div></button>`;
-    }
-    const e = r.e;
-    const mineP = (all.shareByExpense[e.uid] || {})[S.me];
-    const mine = mineP != null ? mineP / 100 : 0;
-    const iPaid = e.paid_by === S.me;
-    let tone = 'n'; let label = '';
-    if (iPaid) {
-      const lent = e.amount_gbp - mine;
-      if (lent > 0.004) { tone = 'g'; label = `you lent ${money(lent)}`; }
-    } else if (mine > 0.004) { tone = 'r'; label = `you borrowed ${money(mine)}`; }
-    const what = e.subtype || e.category || '';
-    return `<button class="ex" data-act="editExpense" data-uid="${esc(e.uid)}">
-        <div class="tile t${tone}"><i class="ti ti-${iconFor(e.category, e.subtype)}" aria-hidden="true"></i></div>
-        <div class="mid"><p class="t">${esc(e.description)}</p>
-          <p class="s">${esc(fmtShort(e.expense_date))}${e.expense_date ? ' · ' : ''}${esc(iPaid ? 'You paid' : `${e.paid_by} paid`)}${what ? ` · ${esc(what)}` : ''}${e.gbp_estimated ? '<span class="est">est. £</span>' : ''}</p>
-          <p class="s">${mineP != null ? `Your share ${money(mine)}` : "You're not involved"}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}</p></div>
-        <div class="amt"><b class="num">${money(e.amount_gbp)}</b>${label ? `<span class="${tone}t">${label}</span>` : ''}${e.orig_amount ? `<span class="m">${esc(fmtNum(e.orig_amount, e.orig_currency))}</span>` : ''}</div>
-      </button>`;
-  }).join('')}`;
+    ${today ? `<p class="today">Today so far <b>${money(today.total)}</b> · your share <b>${money(today.mine)}</b></p>` : ''}
+    <div class="row"><input data-flt="q" placeholder="Search expenses" value="${esc(f.q)}" autocomplete="off"><button class="secondary" data-act="toggleFilters">Filters${(f.who || f.cat || f.mine) ? ' ●' : ''}</button></div>
+    ${f.open ? `<div class="card">
+      <label style="margin-top:0">Paid by</label><select data-flt="who"><option value="">Anyone</option>${people.map((n) => `<option ${f.who === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
+      <label>Category</label><select data-flt="cat"><option value="">All categories</option>${cats.map((n) => `<option ${f.cat === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
+      <label class="check"><input type="checkbox" data-flt="mine" ${f.mine ? 'checked' : ''}> Only ones I'm part of</label>
+      <button class="ghost" data-act="clearFilters">Clear search and filters</button></div>` : ''}
+    <div class="row between" style="margin:6px 0"><div class="seg small"><button class="${sortMode === 'date' ? 'on' : ''}" data-act="sort" data-mode="date">By date</button><button class="${sortMode === 'added' ? 'on' : ''}" data-act="sort" data-mode="added">By when added</button></div><span class="muted" id="fltcount">${esc(countText(all))}</span></div>
+    <div id="explist">${listHtml(all)}</div>`;
 }
 
 // ---- Summary
-function donut(byCategory, total) {
+function donut(byCategory, total, ink = 'currentColor') {
   const R = 40; const C = 2 * Math.PI * R;
   let off = 0;
   const segs = byCategory.map((c, i) => {
@@ -349,8 +397,8 @@ function donut(byCategory, total) {
     off += len;
     return s;
   }).join('');
-  return `<svg width="124" height="124" viewBox="0 0 116 116" role="img" aria-label="Spending by category"><g transform="rotate(-90 58 58)" fill="none" stroke-width="18"><circle cx="58" cy="58" r="${R}" stroke="currentColor" opacity="0.12"/>${segs}</g>
-    <text x="58" y="55" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">Total</text><text x="58" y="70" text-anchor="middle" font-size="13" font-weight="700" fill="currentColor">${esc(money(total).replace(/\.00$/, ''))}</text></svg>`;
+  return `<svg width="124" height="124" viewBox="0 0 116 116" role="img" aria-label="Spending by category"><g transform="rotate(-90 58 58)" fill="none" stroke-width="18"><circle cx="58" cy="58" r="${R}" stroke="${ink}" opacity="0.12"/>${segs}</g>
+    <text x="58" y="55" text-anchor="middle" font-size="10" fill="${ink}" opacity="0.6">Total</text><text x="58" y="70" text-anchor="middle" font-size="13" font-weight="700" fill="${ink}">${esc(money(total).replace(/\.00$/, ''))}</text></svg>`;
 }
 
 function budgetBar(label, st, hint) {
@@ -360,27 +408,19 @@ function budgetBar(label, st, hint) {
     <div class="sub2"><span>${st.left >= 0 ? `${money(st.left)} left` : `${money(-st.left)} over`}</span><span>${hint}</span></div></div>`;
 }
 
-function summaryTab(all) {
-  const t = S.trip;
-  const sm = summarize(t, S.expenses, all, todayIso());
-  const meRow = all.people.find((p) => p.name === S.me);
-  const group = budgetState(t.budget_gbp, all.total);
-  const personalBudget = readStore().budgets[S.code];
-  const personal = budgetState(personalBudget, meRow?.share || 0);
+const summaryMode = () => (readStore().prefs.summaryMode === 'me' ? 'me' : 'all');
+function modeToggle() {
+  const mode = summaryMode();
+  return `<div class="seg" style="margin:8px 0"><button class="${mode === 'all' ? 'on' : ''}" data-act="summaryMode" data-mode="all">Everyone</button><button class="${mode === 'me' ? 'on' : ''}" data-act="summaryMode" data-mode="me">Just me</button></div>`;
+}
+
+function chartBlocks(sm, total, ink) {
   const maxDay = Math.max(1, sm.before, sm.after, ...sm.days.map((d) => d.total));
   const bar = (v) => `${Math.max(3, Math.round((v / maxDay) * 90))}px`;
-  const maxPP = Math.max(1, ...sm.paidVsShare.map((p) => Math.max(p.paid, p.share)));
-  if (!S.expenses.length) return '<p class="sub">Add a few expenses and this page fills in.</p>';
   return `
-    <h2>Budget</h2>
-    <div class="card">
-      ${budgetBar('Group budget', group, group ? `${sm.days.length ? '' : ''}${group.pct}% used` : '') || '<p class="muted" style="margin:0">No group budget set. Add one under More, then Edit trip.</p>'}
-      ${personal ? budgetBar('Your budget <i class="ti ti-lock" aria-hidden="true"></i>', personal, 'only you can see this') : ''}
-      <button class="ghost" data-act="personalBudget">${personal ? 'Change' : 'Set'} your private budget</button>
-    </div>
     <h2>Where the money went</h2>
     <div class="card donutrow">
-      ${donut(sm.byCategory, all.total)}
+      ${donut(sm.byCategory, total, ink)}
       <div class="legend">${sm.byCategory.map((c, i) => {
     const cat = CATEGORIES.find((x) => x.name === c.name);
     return `<div><span><span class="dot" style="background:${PALETTE[i % PALETTE.length]}"></span><i class="ti ti-${cat ? cat.icon : 'dots'}" aria-hidden="true"></i> ${esc(c.name)}</span><span class="num">${money(c.total)}</span></div>`;
@@ -392,12 +432,163 @@ function summaryTab(all) {
       ${sm.days.map((d) => `<div class="day"><b>${money(d.total).replace(/\.00$/, '')}</b><div class="dbar" style="height:${bar(d.total)}"></div>${esc(d.date === 'undated' ? 'No date' : fmtShort(d.date))}</div>`).join('')}
       ${sm.after > 0 ? `<div class="day"><b>${money(sm.after).replace(/\.00$/, '')}</b><div class="dbar before" style="height:${bar(sm.after)}"></div>After</div>` : ''}
     </div><p class="muted" style="margin:8px 0 0">Flights and stays booked before the trip are shown apart so they don't flatten the holiday days.</p></div>
-    <h2>Who paid and who owes</h2>
-    <div class="card">${sm.paidVsShare.map((p) => `<div class="pp"><div class="row between"><span>${esc(p.name === S.me ? `${p.name} (you)` : p.name)}</span><span class="muted num">paid ${money(p.paid)} · share ${money(p.share)}</span></div>
-      <div class="two"><div class="paid" style="width:${(p.paid / maxPP) * 100}%"></div></div><div class="two"><div class="shr" style="width:${(p.share / maxPP) * 100}%"></div></div></div>`).join('')}
-      <p class="muted" style="margin:6px 0 0"><span class="dot" style="background:var(--accent)"></span>paid &nbsp; <span class="dot" style="background:var(--muted)"></span>their share</p></div>
     <h2>Biggest expenses</h2>
     <div class="card">${sm.biggest.map((b) => `<div class="row" style="padding:6px 0"><div class="tile tn" style="width:34px;height:34px;font-size:18px"><i class="ti ti-${iconFor(b.category, b.subtype)}" aria-hidden="true"></i></div><div class="grow"><b>${esc(b.description)}</b><div class="muted">${esc(b.subtype || b.category || '')}${b.date ? ` · ${esc(fmtShort(b.date))}` : ''}</div></div><b class="num">${money(b.amount)}</b></div>`).join('')}</div>`;
+}
+
+function paidVsShareBlock(sm) {
+  const maxPP = Math.max(1, ...sm.paidVsShare.map((p) => Math.max(p.paid, p.share)));
+  return `<h2>Who paid and who owes</h2>
+    <div class="card">${sm.paidVsShare.map((p) => `<div class="pp"><div class="row between"><span>${esc(p.name === S.me ? `${p.name} (you)` : p.name)}</span><span class="muted num">paid ${money(p.paid)} · share ${money(p.share)}</span></div>
+      <div class="two"><div class="paid" style="width:${(p.paid / maxPP) * 100}%"></div></div><div class="two"><div class="shr" style="width:${(p.share / maxPP) * 100}%"></div></div></div>`).join('')}
+      <p class="muted" style="margin:6px 0 0"><span class="dot" style="background:var(--accent)"></span>paid &nbsp; <span class="dot" style="background:var(--muted)"></span>their share</p></div>`;
+}
+
+function coverageBlock(cov) {
+  return `<h2>You and the others</h2>
+    <div class="card">
+      <div class="row between"><span>You paid for other people's shares</span><b class="num">${money(cov.forOthers)}</b></div>
+      <div class="row between" style="margin-top:6px"><span>Other people paid for your share</span><b class="num">${money(cov.byOthers)}</b></div>
+      ${cov.estimated > 0.004 ? `<div class="row between" style="margin-top:6px"><span>Still only estimated in your share</span><b class="num">${money(cov.estimated)}</b></div><p class="muted" style="margin:6px 0 0">The real pounds will firm this up once whoever paid confirms them.</p>` : ''}
+    </div>`;
+}
+
+function paceBlock(pace, mode) {
+  if (!pace) return '';
+  const who = mode === 'me' ? "You're" : "You're all";
+  return `<h2>Pace</h2><div class="card">${who} spending about <b>${money(pace.daily)}</b> a day (day ${pace.elapsed} of ${pace.tripDays}). At this pace the trip ends at about <b>${money(pace.projected)}</b>${pace.budget ? (pace.over ? ` - <span class="neg">over the budget of ${money(pace.budget)}</span>` : ` - within the budget of ${money(pace.budget)}`) : ''}.</div>`;
+}
+
+function summaryTab(all) {
+  const t = S.trip; const mode = summaryMode(); const who = mode === 'me' ? S.me : null;
+  if (!S.expenses.length) return '<p class="sub">Add a few expenses and this page fills in.</p>';
+  const today = todayIso();
+  const sm = summarize(t, S.expenses, all, today, who);
+  const meRow = all.people.find((p) => p.name === S.me);
+  const total = who ? (meRow?.share || 0) : all.total;
+  const personalBudget = readStore().budgets[S.code];
+  const budget = mode === 'all'
+    ? (budgetBar('Group budget', budgetState(t.budget_gbp, all.total), `${budgetState(t.budget_gbp, all.total)?.pct}% used`) || '<p class="muted" style="margin:0">No group budget set. Add one under More, then Edit trip.</p>')
+    : `${budgetBar('Your budget <i class="ti ti-lock" aria-hidden="true"></i>', budgetState(personalBudget, total), 'only you can see this') || '<p class="muted" style="margin:0">You haven\'t set a private budget for this trip.</p>'}
+      <button class="ghost" data-act="personalBudget">${personalBudget ? 'Change' : 'Set'} your private budget</button>`;
+  return `
+    ${modeToggle()}
+    <h2>Budget</h2>
+    <div class="card">${budget}</div>
+    ${paceBlock(paceInfo(sm, t, today, mode === 'all' ? t.budget_gbp : personalBudget), mode)}
+    ${chartBlocks(sm, total, 'currentColor')}
+    ${mode === 'all' ? paidVsShareBlock(sm) : coverageBlock(coverage(S.me, S.expenses, all))}
+    <div style="height:10px"></div>
+    <button class="secondary full" data-act="openRecap">Open the trip summary page</button>`;
+}
+
+// ---- Trip summary (one shareable page)
+function recapView() {
+  const t = S.trip; const mode = summaryMode(); const who = mode === 'me' ? S.me : null;
+  const all = computeAll(t, S.expenses, S.settlements, S.adjustments);
+  const r = buildRecap(t, S.expenses, all, who, todayIso());
+  const th = resolveTheme(t.theme);
+  const ink = typeof getComputedStyle === 'function' && document.body ? getComputedStyle(document.body).color : '#888888';
+  const meta = [t.destination, fmtRange(t.start_date, t.end_date)].filter(Boolean).map(esc).join(' · ');
+  const cat = r.topCategory;
+  const facts = [
+    ['Expenses', String(r.count)],
+    r.priciestDay ? ['Priciest day', `${fmtShort(r.priciestDay.date)} · ${money(r.priciestDay.total)}`] : null,
+    r.priciest ? ['Biggest expense', `${r.priciest.description} · ${money(r.priciest.amount)}`] : null,
+    cat ? ['Top category', `${cat.name} · ${r.total > 0 ? Math.round((cat.total / r.total) * 100) : 0}%`] : null,
+    !who && r.people.length ? ['Per person, per day', money(r.perPersonPerDay)] : null,
+  ].filter(Boolean);
+  const meRow = all.people.find((p) => p.name === S.me);
+  return `
+    <div class="topbar"><button class="ghost" data-act="back">← Back</button></div>
+    ${modeToggle()}
+    <div id="recap" class="recap">
+      ${th.stripe.length ? `<div class="stripe" style="margin:0 0 10px">${th.stripe.map((c) => `<span style="background:${c}"></span>`).join('')}</div>` : ''}
+      <p class="rlabel">Trip summary${who ? ` · just ${esc(who)}` : ''}</p>
+      <h1 style="margin:2px 0 2px">${esc(t.name)}</h1>
+      <p class="sub">${meta}</p>
+      <div class="rtotal"><span>${who ? 'Your share of the trip' : 'Total cost'}</span><b class="num">${money(r.total)}</b></div>
+      <div class="facts">${facts.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>
+      ${chartBlocks(r.sm, r.total, ink)}
+      ${who ? coverageBlock(coverage(S.me, S.expenses, all)) : `<h2>Everyone's part</h2><div class="card">${r.people.map((p) => `<div class="row between" style="padding:3px 0"><span>${esc(p.name)}</span><span class="muted num">paid ${money(p.paid)} · share ${money(p.share)}</span></div>`).join('')}</div>`}
+      <h2>Settling up</h2>
+      <div class="card">${r.settled ? '<b>Everyone is all square.</b>' : r.transfers.map((x) => `<div class="row between" style="padding:3px 0"><span><b>${esc(x.from)}</b> pays <b>${esc(x.to)}</b></span><b class="num">${money(x.amount_gbp)}</b></div>`).join('')}</div>
+      <p class="rfoot">SplitVeryWisely</p>
+    </div>
+    ${S.notice ? `<div class="alert">${esc(S.notice)}</div>` : ''}
+    <button class="full" data-act="sharePicture">Share as picture</button>
+    <p class="muted">If the picture doesn't come out, take a screenshot of this page instead.</p>`;
+}
+
+async function sharePicture() {
+  const el = document.getElementById('recap');
+  try {
+    if (!window.html2canvas) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+        s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
+      });
+    }
+    const canvas = await window.html2canvas(el, { backgroundColor: getComputedStyle(document.body).backgroundColor, scale: 2, useCORS: true });
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    const name = `${(S.trip.name || 'trip').replace(/[^\w\- ]+/g, '').trim() || 'trip'}-summary.png`;
+    const file = new File([blob], name, { type: 'image/png' });
+    if (navigator.canShare?.({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: S.trip.name }); return; } catch (err) { if (err.name === 'AbortError') return; }
+    }
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob); link.download = name; document.body.appendChild(link); link.click(); link.remove();
+    S.notice = `Saved ${name}`; render();
+  } catch {
+    S.notice = 'Couldn\'t make the picture on this phone - take a screenshot of this page instead.'; render();
+  }
+}
+
+// ---- Trip info (shared notes)
+function infoView() {
+  const notes = S.notes.slice().sort((x, y) => String(x.created_at || '').localeCompare(String(y.created_at || '')));
+  const f = S.noteForm;
+  return `
+    <div class="topbar"><button class="ghost" data-act="back">← Back</button></div>
+    <h1>Trip info</h1>
+    <p class="sub">Addresses, flight times, booking references, door codes - everyone on the trip can see and edit these.</p>
+    ${f ? `<div class="card">
+      <label style="margin-top:0">Title</label><input data-f="noteForm" data-k="title" value="${esc(f.title)}" placeholder="e.g. Airbnb address">
+      <label>Details</label><textarea data-f="noteForm" data-k="body" placeholder="Anything worth keeping handy">${esc(f.body)}</textarea>
+      <label class="check"><input type="checkbox" data-f="noteForm" data-k="address" ${f.address ? 'checked' : ''}> This is an address (adds an "Open in maps" button)</label>
+      ${S.error ? `<p class="error">${esc(S.error)}</p>` : ''}
+      <div class="row" style="margin-top:8px"><button class="grow" data-act="saveNote">${f.id ? 'Save changes' : 'Add note'}</button><button class="secondary" data-act="cancelNote">Cancel</button></div>
+      ${f.id ? '<button class="danger" data-act="deleteNote">Delete this note</button>' : ''}</div>`
+    : '<button class="full" data-act="addNote">+ Add a note</button>'}
+    ${notes.length === 0 && !f ? '<p class="sub">Nothing here yet.</p>' : ''}
+    ${notes.map((n) => `<div class="card"><b>${esc(n.title)}</b>${n.body ? `<div style="white-space:pre-wrap;margin-top:4px">${esc(n.body)}</div>` : ''}
+      <div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="secondary" data-act="copyNote" data-uid="${esc(n.uid)}">Copy</button>
+      ${n.address ? `<a class="btn secondary" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([n.title, n.body].filter(Boolean).join(' ').slice(0, 200))}" target="_blank" rel="noopener">Open in maps</a>` : ''}
+      <button class="ghost" data-act="editNote" data-uid="${esc(n.uid)}">Edit</button></div></div>`).join('')}`;
+}
+
+// ---- Tap a person
+function personView() {
+  const name = S.person;
+  const all = computeAll(S.trip, S.expenses, S.settlements, S.adjustments);
+  const row = all.people.find((p) => p.name === name) || { paid: 0, share: 0, net: 0, settled: 0, carried: 0 };
+  const paidFor = S.expenses.filter((e) => e.paid_by === name).sort((x, y) => String(y.expense_date || '').localeCompare(String(x.expense_date || '')));
+  const shares = S.expenses.map((e) => ({ e, p: ((all.shareByExpense[e.uid] || {})[name] || 0) / 100 })).filter((x) => x.p > 0).sort((x, y) => y.p - x.p);
+  const estPaid = paidFor.filter((e) => e.gbp_estimated);
+  const pays = S.settlements.filter((s) => s.from === name || s.to === name);
+  const line = (e, amt) => `<div class="row between" style="padding:4px 0"><span class="grow">${esc(e.description)}<span class="muted"> · ${esc(fmtShort(e.expense_date))}</span>${e.gbp_estimated ? '<span class="est"> est. £</span>' : ''}</span><b class="num">${money(amt)}</b></div>`;
+  return `
+    <div class="topbar"><button class="ghost" data-act="back">← Back</button></div>
+    <h1>${esc(name === S.me ? `${name} (you)` : name)}</h1>
+    <p class="sub ${row.net > 0.004 ? 'pos' : row.net < -0.004 ? 'neg' : ''}">${esc(bal(row.net))}</p>
+    <div class="stat-row"><div class="card"><div class="label">Paid out</div><div class="big num">${money(row.paid)}</div></div><div class="card"><div class="label">Their share</div><div class="big num">${money(row.share)}</div></div></div>
+    ${estPaid.length ? `<div class="alert"><b>${esc(name)} still needs to confirm the real pounds for:</b> ${estPaid.map((e) => esc(e.description)).join(', ')}.</div>` : ''}
+    <h2>What they paid for</h2>
+    <div class="card">${paidFor.length ? paidFor.map((e) => line(e, e.amount_gbp)).join('') : '<p class="muted" style="margin:0">Nothing.</p>'}</div>
+    <h2>Their share of</h2>
+    <div class="card">${shares.length ? shares.map((x) => line(x.e, x.p)).join('') : '<p class="muted" style="margin:0">Nothing.</p>'}</div>
+    ${pays.length ? `<h2>Payments</h2><div class="card">${pays.map((s) => `<div class="row between" style="padding:4px 0"><span>${esc(fmtShort(s.settle_date))} · ${esc(s.from)} paid ${esc(s.to)}</span><b class="num">${money(s.amount_gbp)}</b></div>`).join('')}</div>` : ''}`;
 }
 
 // ---- Balances (who owes what + settle up)
@@ -405,7 +596,7 @@ function balancesTab(all) {
   return `
     ${estimateAlert(all)}
     <h2>Who owes what</h2>
-    ${all.people.map((p) => `<div class="card"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)}</b>
+    ${all.people.map((p) => `<div class="card tap" data-act="openPerson" data-name="${esc(p.name)}"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)} ›</b>
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
       <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}${Math.abs(p.carried) > 0.004 ? ` · Carried over ${p.carried > 0 ? '+' : '-'}${money(Math.abs(p.carried))}` : ''}</div></div>`).join('')}
     <h2>Settle up</h2>
@@ -436,6 +627,8 @@ function moreTab() {
     <div class="row"><input id="addPerson" placeholder="Add someone"><button data-act="addPerson">Add</button></div>
     <h2>Trip</h2>
     <div class="menu">
+      <button data-act="openInfo"><i class="ti ti-info-circle" aria-hidden="true"></i><span>Trip info<small>Addresses, flight times, booking references</small></span></button>
+      <button data-act="openRecap"><i class="ti ti-photo" aria-hidden="true"></i><span>Trip summary<small>One page to look back on, with Share as picture</small></span></button>
       <button data-act="openActivity"><i class="ti ti-bell" aria-hidden="true"></i><span>Activity<small>Everything that changed, and who changed it</small></span></button>
       <button data-act="editTrip"><i class="ti ti-pencil" aria-hidden="true"></i><span>Edit trip<small>Name, dates, currency, rate, budget and theme</small></span></button>
       <button data-act="openCarry"><i class="ti ti-arrow-big-right-lines" aria-hidden="true"></i><span>Settle this trip into another trip<small>Close it and move who-owes-what to another trip</small></span></button>
@@ -459,7 +652,7 @@ function activityView() {
     <h1>Activity</h1>
     <p class="sub">Everything that changed on this trip, newest first.</p>
     ${S.activity.length === 0 ? '<p class="sub">Nothing yet.</p>' : S.activity.map((a) => `
-      <div class="card" style="padding:10px 12px"><div>${esc(a.text)}</div><div class="muted">${esc(fmtWhen(a.at))}</div></div>`).join('')}`;
+      <div class="card" style="padding:10px 12px"><div>${esc(a.text)}</div><div class="muted">${esc(fmtWhen(a.at))}</div>${a.kind === 'deleted' && a.ref && S.deletedMap[a.ref]?.expense ? `<button class="secondary" style="margin-top:8px" data-act="restore" data-uid="${esc(a.ref)}">Restore this expense</button>` : ''}</div>`).join('')}`;
 }
 
 // ---------------------------------------------------------------- expense form
@@ -820,7 +1013,7 @@ async function exportFile() {
 
 async function deleteEverything(code) {
   const batches = [];
-  for (const sub of ['expenses', 'settlements', 'deleted', 'activity', 'adjustments']) {
+  for (const sub of ['expenses', 'settlements', 'deleted', 'activity', 'adjustments', 'notes']) {
     const snap = await getDocs(collection(db, 'trips', code, sub));
     let b = writeBatch(db); let n = 0;
     snap.docs.forEach((d) => { b.delete(d.ref); n += 1; if (n === 400) { batches.push(b); b = writeBatch(db); n = 0; } });
@@ -1003,7 +1196,7 @@ document.addEventListener('click', async (ev) => {
   const f = S.form;
   switch (act) {
     case 'home': location.hash = ''; S.view = 'home'; leaveTrip(); render(); break;
-    case 'back': S.view = 'trip'; S.edit = null; render(); break;
+    case 'back': S.view = 'trip'; S.edit = null; S.person = null; S.noteForm = null; render(); break;
     case 'open': location.hash = `t=${d.code}`; break;
     case 'forget':
       if (confirm('Remove this trip from your phone? It stays available to everyone else, and you can rejoin with the link.')) {
@@ -1066,8 +1259,9 @@ document.addEventListener('click', async (ev) => {
     case 'deleteExpense':
       if (confirm(`Delete "${f.description}"?`)) {
         fireAndForget(deleteDoc(tripRef('expenses', f.uid)));
-        fireAndForget(setDoc(tripRef('deleted', f.uid), { deleted_at: new Date().toISOString(), by: S.me }));
-        logActivity(activityLine('deleted', S.me, `"${f.original?.description || f.description}"`, f.original ? money(f.original.amount_gbp) : ''), 'deleted');
+        // The tombstone keeps a copy of the expense so it can be restored from Activity.
+        fireAndForget(setDoc(tripRef('deleted', f.uid), clean({ deleted_at: new Date().toISOString(), by: S.me, expense: f.original || null })));
+        logActivity(activityLine('deleted', S.me, `"${f.original?.description || f.description}"`, f.original ? money(f.original.amount_gbp) : ''), 'deleted', S.code, S.me, { ref: f.uid });
         S.form = null; S.view = 'trip';
       }
       render(); break;
@@ -1133,6 +1327,43 @@ document.addEventListener('click', async (ev) => {
     case 'carryGo': doCarry(); break;
     case 'openAdj': S.adjView = S.adjustments.find((x) => x.uid === d.uid); S.view = 'adj'; render(); break;
     case 'undoAdj': undoAdj(); break;
+    case 'summaryMode': patchStore((s) => { s.prefs.summaryMode = d.mode; }); render(); break;
+    case 'toggleFilters': S.flt.open = !S.flt.open; render(); break;
+    case 'clearFilters': S.flt = { q: '', who: '', cat: '', mine: false, open: S.flt.open }; render(); break;
+    case 'openPerson': S.person = d.name; S.view = 'person'; render(); window.scrollTo(0, 0); break;
+    case 'openRecap': S.view = 'recap'; S.notice = ''; render(); window.scrollTo(0, 0); break;
+    case 'sharePicture': await sharePicture(); break;
+    case 'openInfo': S.view = 'info'; S.noteForm = null; render(); window.scrollTo(0, 0); break;
+    case 'addNote': S.noteForm = { id: null, title: '', body: '', address: false }; render(); break;
+    case 'editNote': { const n = S.notes.find((x) => x.uid === d.uid); S.noteForm = { id: n.uid, title: n.title || '', body: n.body || '', address: !!n.address }; render(); break; }
+    case 'cancelNote': S.noteForm = null; S.error = ''; render(); break;
+    case 'saveNote': {
+      const nf = S.noteForm;
+      if (!nf.title.trim()) { S.error = 'Give the note a title.'; render(); break; }
+      const existing = nf.id ? (S.notes.find((x) => x.uid === nf.id) || {}) : {};
+      const uid = nf.id || newUid(); const now = new Date().toISOString();
+      fireAndForget(setDoc(tripRef('notes', uid), clean({ title: nf.title.trim(), body: nf.body.trim() || null, address: !!nf.address, created_at: existing.created_at || now, updated_at: now, by: S.me })));
+      logActivity(activityLine(nf.id ? 'edited' : 'added', S.me, `the note "${nf.title.trim()}"`, nf.id ? 'edited' : ''), 'note');
+      S.noteForm = null; S.error = ''; render(); break;
+    }
+    case 'deleteNote': {
+      const nf = S.noteForm;
+      if (confirm('Delete this note?')) { fireAndForget(deleteDoc(tripRef('notes', nf.id))); logActivity(activityLine('deleted', S.me, `the note "${nf.title}"`), 'note'); S.noteForm = null; }
+      render(); break;
+    }
+    case 'copyNote': {
+      const n = S.notes.find((x) => x.uid === d.uid);
+      try { await navigator.clipboard.writeText([n.title, n.body].filter(Boolean).join('\n')); S.notice = 'Copied.'; } catch { S.notice = 'Couldn\'t copy - press and hold the text to copy it.'; }
+      render(); break;
+    }
+    case 'restore': {
+      const tomb = S.deletedMap[d.uid];
+      if (!tomb || !tomb.expense) break;
+      fireAndForget(setDoc(tripRef('expenses', d.uid), clean({ ...tomb.expense, updated_at: new Date().toISOString() })));
+      fireAndForget(deleteDoc(tripRef('deleted', d.uid)));
+      logActivity(activityLine('restored', S.me, `restored "${tomb.expense.description}"`), 'restored');
+      S.notice = 'Restored - it is back in the Expenses list.'; render(); break;
+    }
     case 'claimOwner': await claimOwner(); break;
     case 'deleteTrip': await deleteTrip(); break;
     case 'openCombo': S.combo = { step: 'pick', selected: S.code ? [S.code] : [], data: {}, loaded: false, error: '' }; S.view = 'combo'; render(); break;
@@ -1158,8 +1389,9 @@ document.addEventListener('click', async (ev) => {
 // Typing updates state without redrawing (a redraw would drop the keyboard).
 document.addEventListener('input', (ev) => {
   const t = ev.target;
+  if (t.dataset.flt) { if (t.type !== 'checkbox') { S.flt[t.dataset.flt] = t.value; refreshList(); } return; }
   if (t.dataset.ci !== undefined) { S[t.dataset.f].theme.colors[Number(t.dataset.ci)] = t.value; return; }
-  if (t.dataset.f && t.dataset.k) { S[t.dataset.f][t.dataset.k] = t.value; if (t.dataset.k === 'currency') S[t.dataset.f].currency = t.value.toUpperCase(); return; }
+  if (t.dataset.f && t.dataset.k) { S[t.dataset.f][t.dataset.k] = t.type === 'checkbox' ? t.checked : t.value; if (t.dataset.k === 'currency') S[t.dataset.f].currency = t.value.toUpperCase(); return; }
   const f = S.form;
   if (S.view !== 'form' || !f) return;
   if (t.id === 'f_paste') { f.paste = t.value; return; }
@@ -1170,12 +1402,13 @@ document.addEventListener('input', (ev) => {
 });
 document.addEventListener('change', (ev) => {
   const t = ev.target; const f = S.form;
+  if (t.dataset.flt) { S.flt[t.dataset.flt] = t.type === 'checkbox' ? t.checked : t.value; refreshList(); const c = document.getElementById('fltcount'); if (c) c.textContent = countText(computeAll(S.trip, S.expenses, S.settlements, S.adjustments)); return; }
   if (t.id === 'tripFile' && t.files[0]) { createFromFile(t.files[0]); return; }
   if (t.dataset.combo !== undefined) {
     const c = S.combo; c.selected = t.checked ? [...new Set([...c.selected, t.dataset.combo])] : c.selected.filter((x) => x !== t.dataset.combo); render(); return;
   }
   if (t.dataset.map !== undefined) { patchStore((s) => { if (t.value) s.nameMap[t.dataset.map] = t.value; else delete s.nameMap[t.dataset.map]; }); render(); return; }
-  if (t.dataset.f && t.dataset.k) { S[t.dataset.f][t.dataset.k] = t.value; return; }
+  if (t.dataset.f && t.dataset.k) { S[t.dataset.f][t.dataset.k] = t.type === 'checkbox' ? t.checked : t.value; return; }
   if (S.view !== 'form' || !f) return;
   if (t.dataset.who !== undefined) { f.participants[t.dataset.who].on = t.checked; render(); updateHints(); }
   else if (t.id === 'f_paid_by') { f.paid_by = t.value; render(); updateHints(); }
