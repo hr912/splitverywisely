@@ -1246,12 +1246,27 @@ document.addEventListener('click', async (ev) => {
     case 'usePaste': {
       try {
         const r = parseReceiptBlock(f.paste || document.getElementById('f_paste').value, S.trip.members || []);
+        const filled = [];
         f.items = r.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names }));
+        filled.push(`${r.items.length} items`);
         const isLocal = r.currency && r.currency !== 'GBP';
-        if (r.total != null && f.orig_amount === '' && f.amount_gbp === '') {
-          if (isLocal) { f.orig_amount = r.total; f.orig_currency = r.currency; } else f.amount_gbp = r.total;
+        if (r.total != null) {
+          if (isLocal) {
+            if (f.orig_amount === '') { f.orig_amount = r.total; f.orig_currency = r.currency; filled.push(`the ${r.currency} amount`); }
+          } else if (f.amount_gbp === '') { f.amount_gbp = r.paid_gbp ?? r.total; filled.push('the pounds'); }
         }
-        f.pasteMsg = `Filled in ${r.items.length} items.${r.unknown.length ? ` I didn't recognise: ${r.unknown.join(', ')} - tap their items below to fix.` : ''}`;
+        if (isLocal && r.paid_gbp && f.amount_gbp === '') { f.amount_gbp = r.paid_gbp; filled.push('the pounds paid'); }
+        if (r.place && !f.description.trim()) { f.description = r.place; filled.push('the place'); }
+        if (r.date) { f.expense_date = r.date; filled.push('the date'); }
+        if (r.category && !f.category) { f.category = r.category; f.subtype = r.subtype || ''; filled.push('the category'); }
+        if (r.paid_by) { f.paid_by = r.paid_by; filled.push('who paid'); }
+        if (r.notes && !f.notes.trim()) { f.notes = r.notes; filled.push('notes'); }
+        const issues = [];
+        if (r.fuzzy.length) issues.push(`I read ${r.fuzzy.map((x) => `"${x.given}" as ${x.matched}`).join(', ')} - check that's right.`);
+        if (r.ambiguous.length) issues.push(`${r.ambiguous.map((x) => `"${x.given}" could be ${x.options.join(' or ')}`).join('; ')} - tap the right person on those items.`);
+        if (r.unknown.length) issues.push(`I didn't recognise: ${r.unknown.join(', ')} - tap their items below to fix.`);
+        if (!r.paid_by && !f.uid) issues.push('Check who paid - the block didn\'t say.');
+        f.pasteMsg = `Filled in ${filled.join(', ')}.${issues.length ? ` ${issues.join(' ')}` : ''}`;
       } catch (err) { f.pasteMsg = err.message; }
       render(); updateHints(); break;
     }

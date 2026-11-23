@@ -4,6 +4,7 @@
 import {
   toPence, toPounds, splitAmount, splitItemised, splitItemisedLocal, simplifyDebts,
 } from './trip-math.js';
+import { CATEGORIES } from './categories.js';
 
 export const SPLIT_LABELS = {
   equal: 'Equally',
@@ -136,8 +137,51 @@ export function buildTripFile(trip, expenses, settlements, deletedUids) {
   });
 }
 
-// Reads the block Claude gives back for a receipt photo. Tolerates ``` fences
-// and chatter around the JSON. Names that aren't on the trip are reported, not guessed.
+// Closest-name matching: exact (ignoring case) first, then a unique near match
+// ("Arn" -> Arnav, "Aayush" -> Ayush, "Arnav L." -> Arnav). Several possible people = ambiguous, never a guess.
+const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+const within1 = (a, b) => {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0; let j = 0; let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i += 1; j += 1; continue; }
+    edits += 1; if (edits > 1) return false;
+    if (a.length > b.length) i += 1; else if (a.length < b.length) j += 1; else { i += 1; j += 1; }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+};
+export function matchName(given, members) {
+  const g = String(given ?? '').trim();
+  if (!g) return { kind: 'none' };
+  const exact = members.find((m) => m.toLowerCase() === g.toLowerCase());
+  if (exact) return { kind: 'exact', name: exact };
+  const ng = norm(g);
+  if (!ng) return { kind: 'none' };
+  const hits = members.filter((m) => {
+    const nm = norm(m); const first = norm(m.split(/\s+/)[0]);
+    if (nm === ng || first === ng) return true;
+    if (ng.length >= 3 && (nm.startsWith(ng) || first.startsWith(ng))) return true;
+    if (first.length >= 3 && ng.startsWith(first)) return true;
+    return ng.length >= 4 && (within1(nm, ng) || within1(first, ng));
+  });
+  if (hits.length === 1) return { kind: 'fuzzy', name: hits[0] };
+  if (hits.length > 1) return { kind: 'ambiguous', options: hits };
+  return { kind: 'unknown' };
+}
+
+const validIso = (s) => {
+  if (!s) return null;
+  let v = String(s).trim();
+  const dmy = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/.exec(v);
+  if (dmy) v = `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const d = new Date(`${v}T12:00:00Z`);
+  return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v ? null : v;
+};
+
+// Reads the block Claude gives back for a receipt photo. Tolerates ``` fences and chatter around the JSON.
+// Besides the items and total it can carry the place, date, category, who paid, the pounds paid and notes.
+// Names are matched closely, never guessed: anything unclear is reported so the person can tap the right one.
 export function parseReceiptBlock(text, memberNames) {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
@@ -145,24 +189,38 @@ export function parseReceiptBlock(text, memberNames) {
   let data;
   try { data = JSON.parse(text.slice(start, end + 1)); } catch { throw new Error('That block isn\'t readable - ask Claude to give it again.'); }
   if (!Array.isArray(data.items) || data.items.length === 0) throw new Error('No items found in that block.');
-  const byLower = Object.fromEntries(memberNames.map((n) => [n.toLowerCase(), n]));
-  const unknown = [];
+  const unknown = []; const fuzzy = []; const ambiguous = [];
+  const resolve = (n) => {
+    const m = matchName(n, memberNames);
+    if (m.kind === 'exact') return m.name;
+    if (m.kind === 'fuzzy') { if (!fuzzy.some((x) => x.given === n)) fuzzy.push({ given: n, matched: m.name }); return m.name; }
+    if (m.kind === 'ambiguous') { if (!ambiguous.some((x) => x.given === n)) ambiguous.push({ given: n, options: m.options }); return null; }
+    if (m.kind === 'unknown' && !unknown.includes(n)) unknown.push(n);
+    return null;
+  };
   const items = data.items.map((it) => {
     const given = Array.isArray(it.names) ? it.names : (it.who ? [it.who] : []);
-    const names = [];
-    given.forEach((n) => {
-      const hit = byLower[String(n).trim().toLowerCase()];
-      if (hit) names.push(hit); else if (!unknown.includes(n)) unknown.push(n);
-    });
+    const names = [...new Set(given.map(resolve).filter(Boolean))];
     return {
       description: String(it.description || it.name || '').trim(),
       amount: Number(it.amount),
       names: names.length ? names : (given.length ? [] : memberNames.slice()),
     };
   });
+  const cat = CATEGORIES.find((c) => c.name.toLowerCase() === String(data.category || '').trim().toLowerCase());
+  const sub = cat && data.subtype ? cat.subs.find((s) => s[0].toLowerCase() === String(data.subtype).trim().toLowerCase()) : null;
+  const payer = data.paid_by ? resolve(data.paid_by) : null;
+  const gbp = Number(data.paid_gbp);
   return {
-    items, unknown,
+    items, unknown, fuzzy, ambiguous,
     total: data.total != null && data.total !== '' ? Number(data.total) : null,
     currency: data.currency ? String(data.currency).toUpperCase() : null,
+    place: data.place ? String(data.place).trim() : null,
+    date: validIso(data.date),
+    category: cat ? cat.name : null,
+    subtype: sub ? sub[0] : null,
+    paid_by: payer,
+    paid_gbp: gbp > 0 ? gbp : null,
+    notes: data.notes ? String(data.notes).trim() : null,
   };
 }
