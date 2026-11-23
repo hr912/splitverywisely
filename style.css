@@ -208,3 +208,12 @@ details.card summary { cursor: pointer; font-weight: 600; }
 .recap .facts b { font-size: 0.88rem; font-weight: 600; }
 .recap .rfoot { text-align: center; color: var(--muted); font-size: 0.75rem; margin: 12px 0 0; }
 a.btn { display: inline-flex; align-items: center; text-decoration: none; background: var(--accent-soft); color: var(--accent); }
+
+.pcard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); margin: 8px 0; overflow: hidden; }
+.phead { display: flex; justify-content: space-between; align-items: center; width: 100%; background: none; color: var(--ink); border-radius: 0; padding: 12px 14px; min-height: 0; font-weight: 400; text-align: left; }
+.phead b { font-weight: 700; }
+.phead i { font-size: 16px; color: var(--muted); margin-left: 4px; }
+.plines { padding: 0 14px 12px; font-size: 0.9rem; }
+.plines .row { padding: 3px 0; align-items: flex-start; }
+.plines small { display: block; color: var(--muted); font-size: 0.74rem; }
+.plines .sum { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }

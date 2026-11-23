@@ -211,8 +211,11 @@ export function parseReceiptBlock(text, memberNames) {
   const sub = cat && data.subtype ? cat.subs.find((s) => s[0].toLowerCase() === String(data.subtype).trim().toLowerCase()) : null;
   const payer = data.paid_by ? resolve(data.paid_by) : null;
   const gbp = Number(data.paid_gbp);
+  const extras = Array.isArray(data.extras)
+    ? data.extras.map((x) => ({ label: String(x.label || x.name || 'Extra').trim(), amount: Number(x.amount) })).filter((x) => x.amount > 0)
+    : [];
   return {
-    items, unknown, fuzzy, ambiguous,
+    items, extras, unknown, fuzzy, ambiguous,
     total: data.total != null && data.total !== '' ? Number(data.total) : null,
     currency: data.currency ? String(data.currency).toUpperCase() : null,
     place: data.place ? String(data.place).trim() : null,

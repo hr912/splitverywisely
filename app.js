@@ -8,7 +8,7 @@ import {
   SPLIT_LABELS, clean, newCode, newUid, resolveAmounts, computeAll, buildTripFile, parseReceiptBlock, expenseSharesPence,
 } from './logic.js';
 import {
-  summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex, buildCarryOver,
+  itemisedBreakdown, summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex, buildCarryOver,
   coverage, paceInfo, todayLine, filterRows, buildRecap,
 } from './insights.js';
 import { CATEGORIES, iconFor } from './categories.js';
@@ -671,7 +671,7 @@ function blankForm() {
     uid: null, description: '', expense_date: todayIso(), category: '', subtype: '', amount_gbp: '', orig_amount: '',
     orig_currency: t.currency, rate: '', paid_by: S.me, split_type: d && d.split_type && d.split_type !== 'items' ? d.split_type : 'equal',
     participants: Object.fromEntries(members.map((m) => [m, { on: on.has(m), value: '' }])),
-    items: [{ description: '', amount: '', names: members.slice() }],
+    items: [{ description: '', amount: '', names: members.slice() }], extras: [], editItems: false, collapsed: [],
     notes: '', paste: '', pasteMsg: '',
   };
 }
@@ -687,8 +687,60 @@ function formFromExpense(e) {
     rate: e.gbp_estimated && e.rate ? e.rate : '',
     paid_by: e.paid_by, split_type: e.split_type, participants,
     items: e.items && e.items.length ? e.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names || [] })) : [{ description: '', amount: '', names: members.slice() }],
+    extras: e.extras || [], editItems: false, collapsed: [],
     notes: e.notes || '', paste: '', pasteMsg: '', wasEstimated: !!e.gbp_estimated, original: e,
   };
+}
+
+// ---- itemised receipt: who had what (per person), with their share of service / VAT
+const CUR_SYMBOL = { GBP: '£', EUR: '€', USD: '$' };
+const curFmt = (n, cur) => (CUR_SYMBOL[cur] ? `${CUR_SYMBOL[cur]}${Number(n).toFixed(2)}` : `${Number(n).toFixed(2)} ${cur}`);
+const joinNames = (a) => (a.length <= 1 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
+const shareWord = (n) => (n === 2 ? 'half each' : n === 3 ? 'a third each' : n === 4 ? 'a quarter each' : `1/${n} each`);
+function shareNote(piece, members) {
+  if (piece.count <= 1) return '';
+  const everyone = members.length > 1 && piece.count === members.length;
+  return everyone ? `shared with everyone, ${shareWord(piece.count)}` : `shared with ${joinNames(piece.sharedWith)}, ${shareWord(piece.count)}`;
+}
+
+function formBreakdown(f) {
+  const gbp = f.amount_gbp === '' ? null : Number(f.amount_gbp);
+  const orig = f.orig_amount === '' ? null : Number(f.orig_amount);
+  const rate = Number(f.rate) > 0 ? Number(f.rate) : Number(S.trip.default_rate);
+  const est = gbp == null && orig && rate ? orig * rate : null;
+  return itemisedBreakdown({
+    items: f.items.filter((i) => i.description.trim() || i.amount !== '').map((i) => ({ description: i.description.trim() || 'Item', amount: Number(i.amount) || 0, names: i.names || [], in_local: orig > 0 })),
+    amount_gbp: gbp ?? est ?? 0, orig_amount: orig > 0 ? orig : null, orig_currency: f.orig_currency, paid_by: f.paid_by, extras: f.extras,
+  }, S.trip.members || []);
+}
+
+function itemSummaryHtml(f) {
+  const bd = formBreakdown(f);
+  if (bd.empty) return '';
+  const members = S.trip.members || [];
+  const cur = bd.cur;
+  const poundsConfirmed = f.amount_gbp !== '';
+  const extraName = bd.extraLabels.length ? bd.extraLabels.map((x) => x.label).join(' + ') : '';
+  const warnings = [];
+  if (bd.unassigned.length) warnings.push(`<b>${bd.unassigned.length} item${bd.unassigned.length === 1 ? ' has' : 's have'} nobody</b> (${esc(bd.unassigned.map((i) => i.description || 'Item').join(', '))}) - tap an item's names below to fix.`);
+  if (bd.over) warnings.push(`The items add up to <b>${curFmt(bd.itemsSum, cur)}</b>, which is more than the bill of <b>${curFmt(bd.total, cur)}</b>.`);
+  const cards = bd.people.map((p) => {
+    const open = !(f.collapsed || []).includes(p.name);
+    const gbp = bd.gbpByName && bd.local ? bd.gbpByName[p.name] : null;
+    const gbpText = gbp != null ? ` · ${poundsConfirmed ? '' : '≈ '}£${gbp.toFixed(2)}` : '';
+    return `<div class="pcard">
+      <button type="button" class="phead" data-act="togglePerson" data-name="${esc(p.name)}"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)}</b><span class="num">${curFmt(p.total, cur)}${gbpText} <i class="ti ti-chevron-${open ? 'up' : 'down'}" aria-hidden="true"></i></span></button>
+      ${open ? `<div class="plines">
+        ${p.pieces.map((pc) => `<div class="row between"><span class="grow">${esc(pc.description)}${pc.count > 1 ? `<small>${esc(shareNote(pc, members))}</small>` : ''}</span><span class="num">${curFmt(pc.amount, cur)}</span></div>`).join('')}
+        <div class="row between sum"><span>Items</span><span class="num">${curFmt(p.subtotal, cur)}</span></div>
+        ${p.extra > 0 ? `<div class="row between"><span>${esc(extraName || 'Service, VAT and other')} (your share)</span><span class="num">+ ${curFmt(p.extra, cur)}</span></div>` : ''}
+        <div class="row between sum"><b>Total</b><b class="num">${curFmt(p.total, cur)}${gbpText}</b></div>
+      </div>` : ''}</div>`;
+  }).join('');
+  const check = bd.over || bd.unassigned.length ? '' : `<p class="muted" style="margin:6px 0 0">Bill ${curFmt(bd.total, cur)} = items ${curFmt(bd.itemsSum, cur)}${bd.extras > 0 ? ` + ${bd.extraLabels.map((x) => `${esc(x.label.toLowerCase())} ${curFmt(x.amount, cur)}`).join(' + ')} (about ${bd.extrasPct}% on top, shared in proportion)` : ''}. ${bd.balanced ? 'Everything is shared out.' : ''}</p>`;
+  return `<h2 style="margin-top:14px">Who had what</h2>
+    ${warnings.length ? `<div class="alert">${warnings.join('<br>')}</div>` : ''}
+    ${cards}${check}`;
 }
 
 function formView() {
@@ -696,6 +748,9 @@ function formView() {
   const items = f.split_type === 'items';
   const unit = f.split_type === 'exact' ? '£' : f.split_type === 'percent' ? '%' : f.split_type === 'shares' ? 'shares' : '';
   const itemCur = Number(f.orig_amount) > 0 ? f.orig_currency : 'GBP';
+  const bd = items ? formBreakdown(f) : null;
+  const hasItems = f.items.some((i) => i.description.trim() || i.amount !== '');
+  const editorOpen = items && (f.editItems || !hasItems || !!(bd && (bd.unassigned?.length || bd.over)));
   return `
     <div class="topbar"><button class="ghost" data-act="cancelForm">← Cancel</button></div>
     <h1>${f.uid ? 'Edit expense' : 'Add expense'}</h1>
@@ -721,13 +776,16 @@ function formView() {
       <textarea id="f_paste" placeholder="Paste what Claude gave you">${esc(f.paste)}</textarea>
       <div style="height:8px"></div><button type="button" class="secondary" data-act="usePaste">Fill in the items</button>
       ${f.pasteMsg ? `<p class="sub">${esc(f.pasteMsg)}</p>` : ''}</div>
-      <p class="sub" style="margin-top:10px">Add each item and tap who had it. Service charge, VAT or tip that the items don't cover is shared in proportion to what each person had. Skipped the service? Make the bill match the items. Item amounts are in <b>${esc(itemCur === 'GBP' ? '£' : itemCur)}</b>.</p>
+      <div id="itemsum">${itemSummaryHtml(f)}</div>
+      ${editorOpen ? `<p class="sub" style="margin-top:10px">Add each item and tap who had it. Service charge, VAT or tip that the items don't cover is shared in proportion to what each person had. Skipped the service? Make the bill match the items. Item amounts are in <b>${esc(itemCur === 'GBP' ? '£' : itemCur)}</b>.</p>
       ${f.items.map((it, i) => `<div class="item">
         <div class="row"><input data-item="${i}" data-field="description" value="${esc(it.description)}" placeholder="Item"><input data-item="${i}" data-field="amount" inputmode="decimal" value="${esc(it.amount)}" placeholder="0.00" style="max-width:110px">
         <button type="button" class="danger" data-act="removeItem" data-i="${i}">✕</button></div>
         <div class="chips" style="margin-top:8px">${members.map((m) => `<button type="button" class="chip ${(it.names || []).includes(m) ? 'on' : ''}" data-act="itemWho" data-i="${i}" data-name="${esc(m)}">${esc(m)}</button>`).join('')}</div></div>`).join('')}
       <button type="button" class="secondary" data-act="addItem">+ Add item</button>
-      <div id="itemsHint" class="sub" style="margin-top:8px"></div>`
+      <div id="itemsHint" class="sub" style="margin-top:8px"></div>
+      ${f.editItems && hasItems && !(bd && (bd.unassigned?.length || bd.over)) ? '<button type="button" class="secondary full" data-act="toggleEditor">Done editing</button>' : ''}`
+      : `<button type="button" class="secondary full" data-act="toggleEditor">Edit individual items (${f.items.filter((i) => i.description.trim() || i.amount !== '').length})</button>`}`
     : `
       <div class="row between" style="margin-top:10px"><p class="muted" style="margin:0">Who is it split between?</p>
         <span class="row"><button type="button" class="chip" data-act="preset" data-p="all">Everyone</button><button type="button" class="chip" data-act="preset" data-p="me">Only me</button></span></div>
@@ -745,6 +803,7 @@ function formView() {
 
 function updateHints() {
   const f = S.form; if (!f) return;
+  if (f.split_type === 'items') { const box = document.getElementById('itemsum'); if (box) box.innerHTML = itemSummaryHtml(f); }
   const t = S.trip;
   const gbp = f.amount_gbp === '' ? null : Number(f.amount_gbp);
   const orig = f.orig_amount === '' ? null : Number(f.orig_amount);
@@ -784,12 +843,14 @@ function payloadFromForm() {
       description: i.description.trim(), amount: Number(i.amount), names: i.names || [], ...(local ? { in_local: true } : {}),
     }));
     if (e.items.some((i) => !(i.amount >= 0))) throw new Error('Every item needs an amount.');
+    e.extras = f.extras && f.extras.length ? f.extras.map((x) => ({ label: x.label, amount: Number(x.amount) })) : null;
     e.participants = [];
   } else {
     e.participants = Object.entries(f.participants).filter(([, p]) => p.on).map(([name, p]) => ({
       name, value: f.split_type === 'equal' || p.value === '' ? null : Number(p.value),
     }));
     e.items = null;
+    e.extras = null;
   }
   return e;
 }
@@ -1236,6 +1297,8 @@ document.addEventListener('click', async (ev) => {
       (S.trip.members || []).forEach((m) => { f.participants[m] = { ...f.participants[m], on: d.p === 'all' || m === S.me }; });
       render(); updateHints(); break;
     case 'splitType': f.split_type = d.type; render(); updateHints(); break;
+    case 'toggleEditor': f.editItems = !f.editItems; render(); updateHints(); break;
+    case 'togglePerson': f.collapsed = (f.collapsed || []).includes(d.name) ? f.collapsed.filter((n) => n !== d.name) : [...(f.collapsed || []), d.name]; render(); updateHints(); break;
     case 'addItem': f.items.push({ description: '', amount: '', names: (S.trip.members || []).slice() }); render(); updateHints(); break;
     case 'removeItem': f.items.splice(Number(d.i), 1); if (!f.items.length) f.items.push({ description: '', amount: '', names: (S.trip.members || []).slice() }); render(); updateHints(); break;
     case 'itemWho': {
@@ -1248,7 +1311,9 @@ document.addEventListener('click', async (ev) => {
         const r = parseReceiptBlock(f.paste || document.getElementById('f_paste').value, S.trip.members || []);
         const filled = [];
         f.items = r.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names }));
+        f.extras = r.extras || []; f.editItems = false; f.collapsed = [];
         filled.push(`${r.items.length} items`);
+        if (r.extras.length) filled.push(r.extras.map((x) => x.label.toLowerCase()).join(' and '));
         const isLocal = r.currency && r.currency !== 'GBP';
         if (r.total != null) {
           if (isLocal) {

@@ -1,7 +1,7 @@
 // Calculations behind the Summary page, the Activity log, combined settle-up
 // across trips, the WhatsApp message and the duplicate warning. No screen, no database.
-import { toPence, toPounds, simplifyDebts } from './trip-math.js';
-import { computeAll } from './logic.js';
+import { toPence, toPounds, simplifyDebts, allocate } from './trip-math.js';
+import { computeAll, expenseSharesPence } from './logic.js';
 
 const fmt = (n) => (Number(n) || 0).toLocaleString('en-GB', { style: 'currency', currency: 'GBP' });
 
@@ -181,6 +181,58 @@ export function findDuplicate(expenses, cand) {
     && (e.expense_date || '') === (cand.expense_date || '')
     && ((Math.abs(e.amount_gbp - cand.amount_gbp) < 0.005)
       || (e.orig_amount && cand.orig_amount && Math.abs(e.orig_amount - cand.orig_amount) < 0.005 && e.orig_currency === cand.orig_currency))) || null;
+}
+
+// Who had what on an itemised receipt: every person's items, their share of the extras (service, VAT, tip)
+// and their total - in the receipt's own currency, plus the pounds when they are known.
+export function itemisedBreakdown(e, members = []) {
+  const items = (e.items || []).filter((i) => Number(i.amount) > 0);
+  if (!items.length) return { empty: true };
+  const local = items.some((i) => i.in_local) && Number(e.orig_amount) > 0;
+  const cur = local ? (String(e.orig_currency || '').toUpperCase() || 'EUR') : 'GBP';
+  const totalPence = toPence(Number(local ? e.orig_amount : e.amount_gbp) || 0);
+  const payer = e.paid_by;
+  const unassigned = items.filter((i) => !i.names || !i.names.length);
+  const itemsPence = items.reduce((s, i) => s + toPence(i.amount), 0);
+  const over = itemsPence > totalPence;
+  const people = {};
+  items.forEach((i) => {
+    const names = i.names || [];
+    if (!names.length) return;
+    const part = allocate(toPence(i.amount), names.map((id) => ({ id, weight: 1 })), payer);
+    Object.entries(part).forEach(([n, p]) => {
+      (people[n] ||= { name: n, pieces: [], subtotal: 0 });
+      people[n].pieces.push({ description: i.description, amount: toPounds(p), count: names.length, sharedWith: names.filter((x) => x !== n) });
+      people[n].subtotal += p;
+    });
+  });
+  const extrasPence = over ? 0 : totalPence - itemsPence;
+  const who = Object.keys(people);
+  const extraParts = extrasPence > 0 && who.length ? allocate(extrasPence, who.map((n) => ({ id: n, weight: people[n].subtotal })), payer) : {};
+  const order = (n) => { const k = members.indexOf(n); return k < 0 ? 999 : k; };
+  const list = who.sort((a, b) => order(a) - order(b) || a.localeCompare(b)).map((n) => ({
+    name: n, pieces: people[n].pieces, subtotal: toPounds(people[n].subtotal),
+    extra: toPounds(extraParts[n] || 0), total: toPounds(people[n].subtotal + (extraParts[n] || 0)),
+  }));
+  const assignedTotal = list.reduce((s, p) => s + toPence(p.total), 0);
+  const extrasPounds = toPounds(extrasPence);
+  const named = Array.isArray(e.extras) ? e.extras.filter((x) => Number(x.amount) > 0) : [];
+  const extraLabels = named.length && Math.abs(named.reduce((s, x) => s + Number(x.amount), 0) - extrasPounds) < 0.015
+    ? named
+    : (extrasPence > 0 ? [{ label: 'Service, VAT and other', amount: extrasPounds }] : []);
+  let gbpByName = null;
+  if (!over && !unassigned.length && list.length) {
+    try {
+      const s = expenseSharesPence({ ...e, split_type: 'items', items });
+      gbpByName = Object.fromEntries(Object.entries(s).map(([n, p]) => [n, toPounds(p)]));
+    } catch { gbpByName = null; }
+  }
+  return {
+    cur, local, total: toPounds(totalPence), itemsSum: toPounds(itemsPence), extras: extrasPounds,
+    extrasPct: itemsPence ? Math.round((extrasPence / itemsPence) * 1000) / 10 : 0,
+    extraLabels, people: list, unassigned, over,
+    balanced: !over && !unassigned.length && assignedTotal === totalPence, gbpByName,
+  };
 }
 
 export async function sha256Hex(text) {
