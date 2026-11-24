@@ -1,7 +1,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  doc, getDoc, getDocs, setDoc, deleteDoc, collection, onSnapshot, writeBatch, arrayUnion,
+  doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, onSnapshot, writeBatch, arrayUnion,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
 import {
@@ -55,13 +55,30 @@ const S = {
   newMode: 'file',
 };
 let unsubs = [];
+let idsWriting = false;
 
 // ---------------------------------------------------------------- opening a trip
 function leaveTrip() {
   unsubs.forEach((u) => u());
   unsubs = [];
+  idsWriting = false;
   Object.assign(S, { code: null, trip: null, expenses: [], settlements: [], deleted: [], activity: [], adjustments: [], notes: [], deletedMap: {}, loaded: false, missing: false, pend: { e: 0, s: 0, a: 0 }, isOwner: false, themeKey: '' });
   applyTheme(THEMES.classic);
+}
+
+// Every person on a trip keeps one hidden id for life, even if their name is changed - the desktop app uses it
+// to know "Jay" and the old "Jay Patel" are the same person.
+function ensureMemberIds() {
+  const t = S.trip;
+  if (!t || !navigator.onLine) return;
+  const ids = t.member_ids || {};
+  const missing = (t.members || []).filter((m) => !ids[m]);
+  if (!missing.length) { idsWriting = false; return; }
+  if (idsWriting) return;
+  idsWriting = true;
+  const map = { ...ids };
+  missing.forEach((m) => { map[m] = newUid(); });
+  fireAndForget(updateDoc(tripRef(), { member_ids: map }));
 }
 
 async function computeOwner() {
@@ -95,6 +112,7 @@ function openTrip(code) {
       patchStore((s) => { s.trips[code] = { ...(s.trips[code] || {}), name: S.trip.name }; });
       refreshTheme();
       computeOwner();
+      ensureMemberIds();
     }
     softRender();
   }, () => { S.loaded = true; softRender(); }));
@@ -987,7 +1005,7 @@ async function createFromFile(file) {
       uid: t.uid, name: t.name, destination: t.destination || null, start_date: t.start_date || null, end_date: t.end_date || null,
       status: t.status || 'Planning', currency: t.currency || 'EUR', default_rate: t.default_rate || null, notes: t.notes || null,
       budget_gbp: t.budget_gbp || null, theme: t.theme || null,
-      my_name: t.my_name || null, members, owner_hash: owner.hash, created_at: new Date().toISOString(),
+      my_name: t.my_name || null, members, member_ids: data.member_ids || {}, owner_hash: owner.hash, created_at: new Date().toISOString(),
     }));
     (data.expenses || []).forEach((e) => batch.set(doc(db, 'trips', code, 'expenses', e.uid || newUid()), clean(e)));
     (data.settlements || []).forEach((s) => batch.set(doc(db, 'trips', code, 'settlements', s.uid || newUid()), clean(s)));
@@ -1011,7 +1029,7 @@ async function createBlank() {
     uid: newUid(), name: x.name.trim(), destination: x.destination.trim() || null, start_date: x.start_date || null, end_date: x.end_date || null,
     status: 'Planning', currency: (x.currency || 'EUR').trim().toUpperCase().slice(0, 5),
     default_rate: Number(x.default_rate) > 0 ? Number(x.default_rate) : null, budget_gbp: Number(x.budget_gbp) > 0 ? Number(x.budget_gbp) : null,
-    theme: themeValue(x.theme), notes: null, my_name: me, members, owner_hash: owner.hash, created_at: new Date().toISOString(),
+    theme: themeValue(x.theme), notes: null, my_name: me, members, member_ids: Object.fromEntries(members.map((n) => [n, newUid()])), owner_hash: owner.hash, created_at: new Date().toISOString(),
   })));
   chooseMeAndOpen(code, me, owner.token);
 }
@@ -1036,6 +1054,10 @@ async function renamePerson(oldName, newName) {
   const now = new Date().toISOString();
   const batch = writeBatch(db);
   batch.set(tripRef(), { members: (S.trip.members || []).map(sw), ...(S.trip.my_name === oldName ? { my_name: newName } : {}) }, { merge: true });
+  // the person keeps their hidden id under the new name
+  const ids = { ...(S.trip.member_ids || {}) };
+  if (ids[oldName]) { ids[newName] = ids[oldName]; delete ids[oldName]; }
+  batch.update(tripRef(), { member_ids: ids });
   S.expenses.forEach((e) => {
     const touches = e.paid_by === oldName || (e.participants || []).some((p) => p.name === oldName) || (e.items || []).some((i) => (i.names || []).includes(oldName));
     if (!touches) return;
@@ -1281,6 +1303,7 @@ document.addEventListener('click', async (ev) => {
       const name = document.getElementById('newMe').value.trim();
       if (!name) { S.error = 'Type your name first.'; render(); break; }
       fireAndForget(setDoc(tripRef(), { members: arrayUnion(name) }, { merge: true }));
+      fireAndForget(updateDoc(tripRef(), { member_ids: { ...(S.trip.member_ids || {}), [name]: newUid() } }));
       setMe(name);
       logActivity(activityLine('joined', name, 'joined the trip'), 'joined', S.code, name);
       break;
@@ -1369,7 +1392,7 @@ document.addEventListener('click', async (ev) => {
     }
     case 'addPerson': {
       const name = document.getElementById('addPerson').value.trim();
-      if (name && !(S.trip.members || []).includes(name)) { fireAndForget(setDoc(tripRef(), { members: arrayUnion(name) }, { merge: true })); logActivity(activityLine('added', S.me, `${name} to the trip`), 'joined'); }
+      if (name && !(S.trip.members || []).includes(name)) { fireAndForget(setDoc(tripRef(), { members: arrayUnion(name) }, { merge: true })); fireAndForget(updateDoc(tripRef(), { member_ids: { ...(S.trip.member_ids || {}), [name]: newUid() } })); logActivity(activityLine('added', S.me, `${name} to the trip`), 'joined'); }
       break;
     }
     case 'rename': {

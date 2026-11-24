@@ -130,6 +130,7 @@ export function buildTripFile(trip, expenses, settlements, deletedUids) {
       theme: trip.theme || null, budget_gbp: trip.budget_gbp || null,
     },
     members: trip.members || [],
+    member_ids: trip.member_ids || {},
     categories: trip.categories || [],
     expenses: expenses.map(strip),
     settlements,
