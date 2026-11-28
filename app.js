@@ -64,6 +64,13 @@ const curMonth = () => S.month || thisMonth();
 // Balances can be shown as the fewest payments overall ("simple") or only what is between each pair of people ("direct").
 const balanceMode = () => (readStore().prefs.balanceMode === 'direct' && !S.adjustments.length ? 'direct' : 'simple');
 const transfersFor = (all) => (balanceMode() === 'direct' ? pairwiseTransfers(S.trip, S.expenses, S.settlements) : all.transfers);
+// Under each person: who they pay / who pays them, following the chosen view (fewest payments, or directly between people).
+function owesLines(name, transfers) {
+  const out = transfers.filter((t) => t.from === name).map((t) => `Owes ${t.to === S.me ? 'you' : t.to} ${money(t.amount_gbp)}`);
+  const inn = transfers.filter((t) => t.to === name).map((t) => `Is owed ${money(t.amount_gbp)} by ${t.from === S.me ? 'you' : t.from}`);
+  const all = [...out, ...inn];
+  return all.length ? `<div class="owes">${all.map(esc).join(' · ')}</div>` : '';
+}
 function balanceToggle() {
   if (S.adjustments.length) return '<p class="muted">Carried-over balances are in this trip, so payments are shown in the simplified way only.</p>';
   const m = balanceMode();
@@ -697,6 +704,7 @@ function personView() {
     <div class="topbar"><button class="ghost" data-act="back">← Back</button></div>
     <h1>${esc(name === S.me ? `${name} (you)` : name)}</h1>
     <p class="sub ${row.net > 0.004 ? 'pos' : row.net < -0.004 ? 'neg' : ''}">${esc(bal(row.net))}</p>
+    ${owesLines(name, transfersFor(all))}
     <div class="stat-row"><div class="card"><div class="label">Paid out</div><div class="big num">${money(row.paid)}</div></div><div class="card"><div class="label">Their share</div><div class="big num">${money(row.share)}</div></div></div>
     ${estPaid.length ? `<div class="alert"><b>${esc(name)} still needs to confirm the real pounds for:</b> ${estPaid.map((e) => esc(e.description)).join(', ')}.</div>` : ''}
     <h2>What they paid for</h2>
@@ -711,12 +719,13 @@ function balancesTab(all) {
   if (isTab()) return tabBalancesTab(all);
   return `
     ${estimateAlert(all)}
+    ${balanceToggle()}
     <h2>Who owes what</h2>
     ${all.people.map((p) => `<div class="card tap" data-act="openPerson" data-name="${esc(p.name)}"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)} ›</b>
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
+      ${owesLines(p.name, transfersFor(all))}
       <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}${Math.abs(p.carried) > 0.004 ? ` · Carried over ${p.carried > 0 ? '+' : '-'}${money(Math.abs(p.carried))}` : ''}</div></div>`).join('')}
     <h2>Settle up</h2>
-    ${balanceToggle()}
     <p class="sub">Always in pounds. Someone paid a different amount? Use "Record a payment".</p>
     ${transfersFor(all).length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : transfersFor(all).map((t) => `
       <div class="card"><div class="row between"><span><b>${esc(t.from === S.me ? 'You' : t.from)}</b> pay${t.from === S.me ? '' : 's'} <b>${esc(t.to === S.me ? 'you' : t.to)}</b></span><b class="num">${money(t.amount_gbp)}</b></div>
@@ -792,13 +801,14 @@ function tabBalancesTab(all) {
   return `
     ${pend.toConfirm.length ? `<h2>Waiting for you</h2>${pend.toConfirm.map((s) => payRow(s, `<button class="grow" data-act="confirmPay" data-uid="${esc(s.uid)}">Got it</button><button class="secondary" data-act="declinePay" data-uid="${esc(s.uid)}">Haven't received it</button>`)).join('')}` : ''}
     ${pend.waiting.length ? `<h2>You've paid - waiting for them</h2>${pend.waiting.map((s) => payRow(s, `<span class="muted grow">Waiting for ${esc(s.to)} to tap "Got it"</span><button class="danger" data-act="cancelClaim" data-uid="${esc(s.uid)}">Cancel</button>`)).join('')}` : ''}
+    ${balanceToggle()}
     <h2>Who owes what</h2>
     <p class="sub">Everything on the tab so far. Payments only count once the person who received them has tapped "Got it".</p>
     ${all.people.map((p) => `<div class="card tap" data-act="openPerson" data-name="${esc(p.name)}"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)} ›</b>
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
+      ${owesLines(p.name, transfersFor(all))}
       <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}</div></div>`).join('')}
     <h2>Settle up</h2>
-    ${balanceToggle()}
     <p class="sub">Paid someone? Tap "I've paid" and they'll be asked to confirm.</p>
     ${transfersFor(all).length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : transfersFor(all).map((t) => {
     const mine = t.from === S.me; const toMe = t.to === S.me;
