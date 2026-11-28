@@ -217,3 +217,16 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; backgr
 .plines .row { padding: 3px 0; align-items: flex-start; }
 .plines small { display: block; color: var(--muted); font-size: 0.74rem; }
 .plines .sum { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
+
+/* running tabs */
+nav.tabs button { position: relative; }
+nav.tabs button .dotn { top: 4px; right: calc(50% - 22px); }
+.tapalert { display: block; width: 100%; text-align: left; border: 0; font: inherit; cursor: pointer; }
+.mbar { margin: 4px 0 10px; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+.mbar .chip { flex: none; }
+.mrow { display: flex; align-items: center; gap: 10px; width: 100%; background: none; color: var(--ink); border-radius: 8px; padding: 6px 4px; min-height: 0; font-weight: 400; text-align: left; }
+.mrow.on { background: var(--accent-soft); }
+.mrow .ml { flex: none; width: 52px; color: var(--muted); font-size: 0.82rem; }
+.mrow .mb { flex: 1; height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
+.mrow .mb span { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+.mrow b { flex: none; min-width: 74px; text-align: right; font-size: 0.9rem; }

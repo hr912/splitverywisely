@@ -318,3 +318,67 @@ export function buildRecap(trip, expenses, all, who, today) {
     transfers: all.transfers,
   };
 }
+
+// ---------------------------------------------------------------- running tabs (months, statements, payments to confirm)
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+export const monthLabel = (ym) => (ym === 'all' ? 'All time' : `${MONTH_NAMES[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`);
+export const monthShort = (ym) => `${MONTH_NAMES[Number(ym.slice(5, 7)) - 1].slice(0, 3)} ${ym.slice(2, 4)}`;
+export const monthEnd = (ym) => new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0)).toISOString().slice(0, 10);
+export const inMonth = (iso, ym) => ym === 'all' || (iso || '').slice(0, 7) === ym;
+export const prevMonth = (ym) => new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 2, 1)).toISOString().slice(0, 7);
+
+// Every month that has an expense or a payment, newest first, always including this month.
+export function monthsWithData(expenses, settlements, thisMonth) {
+  const set = new Set([thisMonth]);
+  expenses.forEach((e) => { if (e.expense_date) set.add(e.expense_date.slice(0, 7)); });
+  settlements.forEach((s) => { if (s.settle_date) set.add(s.settle_date.slice(0, 7)); });
+  return [...set].sort().reverse();
+}
+
+// Month by month totals for the Summary page (newest first, at most `limit` months).
+export function monthTotals(expenses, months, limit = 12) {
+  return months.slice(0, limit).map((m) => ({
+    month: m,
+    total: toPounds(expenses.filter((e) => inMonth(e.expense_date, m)).reduce((s, e) => s + toPence(e.amount_gbp), 0)),
+  }));
+}
+
+// Payments someone says they made that are still waiting for the receiver: those I must confirm, and those I'm waiting on.
+export function pendingPayments(settlements, me) {
+  const claimed = settlements.filter((s) => s.status === 'claimed');
+  return {
+    toConfirm: claimed.filter((s) => s.to === me),
+    waiting: claimed.filter((s) => s.from === me),
+    others: claimed.filter((s) => s.from !== me && s.to !== me),
+  };
+}
+
+// Who owes whom as of the end of a month (expenses and confirmed payments dated up to then), plus that month's spending.
+export function tabStatement(trip, expenses, settlements, ym) {
+  const end = monthEnd(ym);
+  const upTo = computeAll(trip, expenses.filter((e) => !e.expense_date || e.expense_date <= end), settlements.filter((s) => !s.settle_date || s.settle_date <= end), []);
+  const inM = expenses.filter((e) => inMonth(e.expense_date, ym));
+  const month = computeAll(trip, inM, [], []);
+  const waiting = settlements.filter((s) => s.status === 'claimed' && (!s.settle_date || s.settle_date <= end));
+  return {
+    month: ym, label: monthLabel(ym), end, monthTotal: month.total, monthCount: inM.length,
+    people: upTo.people, transfers: upTo.transfers, waiting,
+  };
+}
+
+export function statementMessage(tabName, st, link) {
+  const lines = [`${tabName} - statement for ${st.label}`, `Spent this month: ${fmt(st.monthTotal)} (${st.monthCount} expense${st.monthCount === 1 ? '' : 's'})`, ''];
+  if (!st.transfers.length) {
+    lines.push('Everyone is all square.');
+  } else {
+    lines.push(`Who pays whom (up to ${st.end.split('-').reverse().join('/')}):`);
+    st.transfers.forEach((t) => lines.push(`${t.from} pays ${t.to} ${fmt(t.amount_gbp)}`));
+  }
+  if (st.waiting.length) {
+    lines.push('', 'Already paid, waiting for the other person to confirm:');
+    st.waiting.forEach((s) => lines.push(`${s.from} -> ${s.to} ${fmt(s.amount_gbp)}`));
+  }
+  lines.push('', 'Once you have paid, tap "I\'ve paid" in the app. The person you paid taps "Got it" when it arrives.');
+  if (link) lines.push(link);
+  return lines.join('\n');
+}

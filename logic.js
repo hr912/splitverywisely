@@ -93,7 +93,8 @@ export function computeAll(trip, expenses, settlements, adjustments = []) {
     const cat = e.category || 'Uncategorised';
     byCategory[cat] = (byCategory[cat] || 0) + amt;
   });
-  settlements.forEach((s) => {
+  // A payment someone says they made (running tabs) only counts once the person it went to has confirmed it.
+  settlements.filter((s) => !s.status || s.status === 'confirmed').forEach((s) => {
     const a = toPence(s.amount_gbp);
     settled[s.from] = (settled[s.from] || 0) + a;
     settled[s.to] = (settled[s.to] || 0) - a;
@@ -127,7 +128,7 @@ export function buildTripFile(trip, expenses, settlements, deletedUids) {
       uid: trip.uid, name: trip.name, destination: trip.destination || null, start_date: trip.start_date || null,
       end_date: trip.end_date || null, status: trip.status || 'Planning', currency: trip.currency,
       default_rate: trip.default_rate || null, notes: trip.notes || null, my_name: trip.my_name || null,
-      theme: trip.theme || null, budget_gbp: trip.budget_gbp || null,
+      theme: trip.theme || null, budget_gbp: trip.budget_gbp || null, kind: trip.kind || null,
     },
     members: trip.members || [],
     member_ids: trip.member_ids || {},

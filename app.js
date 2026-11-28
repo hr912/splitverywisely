@@ -10,6 +10,7 @@ import {
 import {
   itemisedBreakdown, summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex, buildCarryOver,
   coverage, paceInfo, todayLine, filterRows, buildRecap,
+  monthLabel, monthShort, monthEnd, inMonth, prevMonth, monthsWithData, monthTotals, pendingPayments, tabStatement, statementMessage,
 } from './insights.js';
 import { CATEGORIES, iconFor } from './categories.js';
 import { THEMES, PRESET_ORDER, ICON_LIBRARY, resolveTheme, pickGreeting, applyTheme } from './theme.js';
@@ -53,7 +54,13 @@ const S = {
   flt: { q: '', who: '', cat: '', mine: false, open: false },
   error: '', notice: '',
   newMode: 'file',
+  month: null, stmtMonth: null, homeBadges: {},
 };
+// A running tab is a trip document with kind: 'tab' - same engine, but no dates, pounds only, month views and statements.
+const isTab = () => S.trip?.kind === 'tab';
+const noun = () => (isTab() ? 'tab' : 'trip');
+const thisMonth = () => todayIso().slice(0, 7);
+const curMonth = () => S.month || thisMonth();
 let unsubs = [];
 let idsWriting = false;
 
@@ -101,6 +108,7 @@ function openTrip(code) {
   S.me = readStore().trips[code]?.me || null;
   S.view = S.me ? 'trip' : 'who';
   S.tab = 'expenses';
+  S.month = null; S.stmtMonth = null;
   const base = ['trips', code];
   // includeMetadataChanges makes these fire again the moment the server confirms a write,
   // so "waiting to upload" clears by itself.
@@ -109,7 +117,7 @@ function openTrip(code) {
     S.missing = !snap.exists();
     S.trip = snap.exists() ? snap.data() : null;
     if (S.trip) {
-      patchStore((s) => { s.trips[code] = { ...(s.trips[code] || {}), name: S.trip.name }; });
+      patchStore((s) => { s.trips[code] = { ...(s.trips[code] || {}), name: S.trip.name, kind: S.trip.kind || 'trip' }; });
       refreshTheme();
       computeOwner();
       ensureMemberIds();
@@ -151,7 +159,7 @@ function routeFromHash() {
   const m = /[#&]t=([a-z0-9]+)/i.exec(location.hash);
   if (m) {
     openTrip(m[1].toLowerCase());
-  } else if (!['new', 'combo'].includes(S.view)) {
+  } else if (!['new', 'newtab', 'combo'].includes(S.view)) {
     leaveTrip();
     S.view = 'home';
     render();
@@ -173,7 +181,7 @@ function logActivity(text, kind, code = S.code, by = S.me, extra = {}) {
 // ---------------------------------------------------------------- rendering
 function softRender() { if (!FORM_VIEWS.includes(S.view) && !(S.view === 'info' && S.noteForm)) render(); }
 function render() {
-  const views = { home: homeView, new: newView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView, carry: carryView, adj: adjView, info: infoView, person: personView, recap: recapView };
+  const views = { home: homeView, new: newView, newtab: newTabView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView, carry: carryView, adj: adjView, info: infoView, person: personView, recap: recapView };
   $app.innerHTML = (views[S.view] || tripView)();
 }
 
@@ -209,24 +217,66 @@ function tripFields(f) {
     ${themePicker(f)}`;
 }
 
+function homeRow([code, t]) {
+  const n = S.homeBadges[code] || 0;
+  return `
+      <div class="ex" style="padding:6px 10px 6px 14px"><button class="plain grow" data-act="open" data-code="${esc(code)}"><span class="title">${esc(t.name || (t.kind === 'tab' ? 'Tab' : 'Trip'))}</span>
+      <div class="muted">${t.me ? `You are ${esc(t.me)}` : 'Tap to choose who you are'}${n ? ` · <b class="neg">${n} payment${n === 1 ? '' : 's'} to confirm</b>` : ''}</div></button>
+      <button class="danger" data-act="forget" data-code="${esc(code)}" aria-label="Remove from this phone">Remove</button></div>`;
+}
+
 function homeView() {
-  const trips = Object.entries(readStore().trips);
+  const all = Object.entries(readStore().trips);
+  const tabs = all.filter(([, t]) => t.kind === 'tab');
+  const trips = all.filter(([, t]) => t.kind !== 'tab');
   return `
     <h1>SplitVeryWisely</h1>
-    <p class="sub">Share the cost of a trip with friends. Everyone sees every expense straight away.</p>
-    ${trips.length ? `<h2>Your trips</h2>${trips.map(([code, t]) => `
-      <div class="ex" style="padding:6px 10px 6px 14px"><button class="plain grow" data-act="open" data-code="${esc(code)}"><span class="title">${esc(t.name || 'Trip')}</span>
-      <div class="muted">${t.me ? `You are ${esc(t.me)}` : 'Tap to choose who you are'}</div></button>
-      <button class="danger" data-act="forget" data-code="${esc(code)}" aria-label="Remove from this phone">Remove</button></div>`).join('')}
+    <p class="sub">Share the cost of a trip or a night out with friends. Everyone sees every expense straight away.</p>
+    ${tabs.length ? `<h2>Running tabs</h2>${tabs.map(homeRow).join('')}` : ''}
+    ${trips.length ? `<h2>Your trips</h2>${trips.map(homeRow).join('')}
       ${trips.length > 1 ? '<button class="secondary full" data-act="openCombo">Settle several trips together</button>' : ''}` : ''}
-    <h2>Join a trip</h2>
+    <h2>Join a trip or a tab</h2>
     <p class="sub">Open the link your friend sent you, or paste it here.</p>
-    <input id="joinInput" placeholder="Paste the trip link" autocapitalize="off" autocorrect="off">
+    <input id="joinInput" placeholder="Paste the link" autocapitalize="off" autocorrect="off">
     <div style="height:10px"></div>
     <button class="full" data-act="join">Join</button>
     ${S.error ? `<p class="error">${esc(S.error)}</p>` : ''}
-    <h2>Start a new trip</h2>
-    <button class="secondary full" data-act="startNew">Start a new trip</button>`;
+    <h2>Start something new</h2>
+    <p class="sub">A <b>trip</b> is for a holiday or a day out. A <b>running tab</b> keeps going all year - like nights out with the same friends - with a statement each month.</p>
+    <button class="secondary full" data-act="startNew">Start a new trip</button>
+    <div style="height:8px"></div>
+    <button class="secondary full" data-act="startTab">Start a running tab</button>`;
+}
+
+// One quick look at each running tab for payments waiting for me to confirm (shown on the home screen).
+async function loadHomeBadges() {
+  const store = readStore();
+  const tabs = Object.entries(store.trips).filter(([, t]) => t.kind === 'tab' && t.me);
+  if (!tabs.length || !navigator.onLine) return;
+  const out = {};
+  for (const [code, t] of tabs) {
+    try {
+      const snap = await getDocs(collection(db, 'trips', code, 'settlements'));
+      const n = snap.docs.filter((d) => d.data().status === 'claimed' && d.data().to === t.me).length;
+      if (n) out[code] = n;
+    } catch { /* offline or no access - no badge */ }
+  }
+  S.homeBadges = out;
+  if (S.view === 'home') render();
+}
+
+function newTabView() {
+  return `
+    <div class="topbar"><button class="ghost" data-act="home">← Back</button></div>
+    <h1>Start a running tab</h1>
+    <p class="sub">One shared balance that keeps going - add everything you pay for as you go, and send a statement at the end of each month. Always in pounds.</p>
+    <label>Name of the tab</label><input data-f="nt" data-k="name" value="${esc(S.nt.name)}" placeholder="e.g. Leicester nights">
+    <label>Your name</label><input data-f="nt" data-k="me" value="${esc(S.nt.me)}" placeholder="How your friends know you">
+    <label>Friends (separate names with commas)</label><input data-f="nt" data-k="friends" value="${esc(S.nt.friends)}" placeholder="Jay, Ayush">
+    ${themePicker('nt')}
+    ${S.error ? `<p class="error">${esc(S.error)}</p>` : ''}
+    <div style="height:14px"></div>
+    <button class="full" data-act="createTab">Create tab</button>`;
 }
 
 function newView() {
@@ -282,35 +332,41 @@ const unseenCount = () => {
 };
 
 function tripView() {
-  if (!S.loaded) return '<p class="loading">Opening trip…</p>';
+  if (!S.loaded) return `<p class="loading">Opening ${S.code && readStore().trips[S.code]?.kind === 'tab' ? 'tab' : 'trip'}…</p>`;
   if (S.missing || !S.trip) return missingView();
-  const t = S.trip;
+  const t = S.trip; const tab = isTab();
   const th = resolveTheme(t.theme);
   const all = computeAll(t, S.expenses, S.settlements, S.adjustments);
   const meRow = all.people.find((p) => p.name === S.me);
+  const pend = tab ? pendingPayments(S.settlements, S.me) : null;
   const body = S.tab === 'summary' ? summaryTab(all) : S.tab === 'balances' ? balancesTab(all) : S.tab === 'more' ? moreTab() : expensesTab(all);
-  const meta = [t.destination, fmtRange(t.start_date, t.end_date)].filter(Boolean).map(esc).join(' · ');
+  const meta = tab ? 'Running tab' : [t.destination, fmtRange(t.start_date, t.end_date)].filter(Boolean).map(esc).join(' · ');
   const un = unseenCount();
+  const nowMonthTotal = tab ? computeAll(t, S.expenses.filter((e) => inMonth(e.expense_date, thisMonth())), [], []).total : 0;
+  const myNet = meRow ? meRow.net : 0;
+  const cards = tab
+    ? `<div class="mini a1"><div class="k">${esc(monthLabel(thisMonth()))}</div><div class="v num">${money(nowMonthTotal)}</div></div>
+        <div class="mini a2"><div class="k">Your balance</div><div class="v num">${Math.abs(myNet) < 0.005 ? 'All square' : myNet > 0 ? `+${money(myNet)}` : `-${money(-myNet)}`}</div></div>`
+    : `<div class="mini a1"><div class="k">Trip total</div><div class="v num">${money(all.total)}</div></div>
+        <div class="mini a2"><div class="k">Your share</div><div class="v num">${money(meRow?.share || 0)}</div></div>`;
   return `
     <header class="top">
       ${th.stripe.length ? `<div class="stripe">${th.stripe.map((c) => `<span style="background:${c}"></span>`).join('')}</div>` : ''}
-      <div class="row between"><button class="ghost" data-act="home">← Trips</button>
-        <span class="row">${syncBadge()}<button class="bell" data-act="openInfo" aria-label="Trip info"><i class="ti ti-info-circle" aria-hidden="true"></i></button><button class="bell" data-act="openActivity" aria-label="Activity"><i class="ti ti-bell" aria-hidden="true"></i>${un ? `<span class="dotn">${un > 9 ? '9+' : un}</span>` : ''}</button></span></div>
+      <div class="row between"><button class="ghost" data-act="home">${tab ? '← Home' : '← Trips'}</button>
+        <span class="row">${syncBadge()}<button class="bell" data-act="openInfo" aria-label="Info"><i class="ti ti-info-circle" aria-hidden="true"></i></button><button class="bell" data-act="openActivity" aria-label="Activity"><i class="ti ti-bell" aria-hidden="true"></i>${un ? `<span class="dotn">${un > 9 ? '9+' : un}</span>` : ''}</button></span></div>
       <div class="ttl">${esc(t.name)}</div>
       <div class="meta">${meta}${meta ? ' · ' : ''}<em>${esc(S.greeting)}, ${esc(S.me)}</em></div>
-      <div class="cards2">
-        <div class="mini a1"><div class="k">Trip total</div><div class="v num">${money(all.total)}</div></div>
-        <div class="mini a2"><div class="k">Your share</div><div class="v num">${money(meRow?.share || 0)}</div></div>
-      </div>
+      <div class="cards2">${cards}</div>
     </header>
     ${S.notice ? `<div class="alert">${esc(S.notice)}</div>` : ''}
     ${S.error ? `<p class="error">${esc(S.error)}</p>` : ''}
-    ${carryBanner(all)}
+    ${pend && pend.toConfirm.length && S.tab !== 'balances' ? `<button class="alert tapalert" data-act="tab" data-tab="balances"><b>${pend.toConfirm.length} payment${pend.toConfirm.length === 1 ? '' : 's'} waiting for you to confirm</b> - tap to see</button>` : ''}
+    ${tab ? '' : carryBanner(all)}
     ${body}
     ${S.tab === 'expenses' ? '<div class="fabs"><button class="secondary" data-act="addReceipt">From a receipt</button><button data-act="addExpense">+ Add expense</button></div>' : ''}
     <nav class="tabs">
       ${[['expenses', 'Expenses', 'receipt-2'], ['summary', 'Summary', 'chart-pie'], ['balances', 'Balances', 'scale'], ['more', 'More', 'dots']]
-    .map(([k, l, ic]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}"><i class="ti ti-${ic}" aria-hidden="true"></i><span>${l}</span></button>`).join('')}
+    .map(([k, l, ic]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}"><i class="ti ti-${ic}" aria-hidden="true"></i><span>${l}</span>${k === 'balances' && pend && pend.toConfirm.length ? `<span class="dotn">${pend.toConfirm.length}</span>` : ''}</button>`).join('')}
     </nav>`;
 }
 
@@ -335,7 +391,9 @@ function rowsFor(all) {
   ].sort((x, y) => (sortMode === 'added'
     ? String(y.added).localeCompare(String(x.added))
     : String(y.date).localeCompare(String(x.date)) || String(y.added).localeCompare(String(x.added))));
-  return filterRows(rows, S.flt, S.me, all);
+  const month = curMonth();
+  const shown = isTab() && month !== 'all' ? rows.filter((r) => r.kind === 'carry' || inMonth(r.date, month)) : rows;
+  return filterRows(shown, S.flt, S.me, all);
 }
 
 function rowHtml(r, all) {
@@ -345,7 +403,7 @@ function rowHtml(r, all) {
   }
   if (r.kind === 'payment') {
     const s = r.s;
-    return `<button class="ex pay" data-act="editPayment" data-uid="${esc(s.uid)}"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} <b>${money(s.amount_gbp)}</b></p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment${s.notes ? ` · ${esc(s.notes)}` : ''}</p></div></button>`;
+    return `<button class="ex pay" data-act="editPayment" data-uid="${esc(s.uid)}"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} <b>${money(s.amount_gbp)}</b></p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment${s.status === 'claimed' ? ' · <b class="neg">waiting for confirmation</b>' : ''}${s.notes ? ` · ${esc(s.notes)}` : ''}</p></div></button>`;
   }
   const e = r.e;
   const mineP = (all.shareByExpense[e.uid] || {})[S.me];
@@ -386,6 +444,20 @@ function refreshList() {
   if (c) c.textContent = countText(all);
 }
 
+// Month chips for a running tab (newest first, plus "All").
+function monthBar() {
+  const months = monthsWithData(S.expenses, S.settlements, thisMonth());
+  const cur = curMonth();
+  return `<div class="chips mbar">${months.slice(0, 14).map((m) => `<button type="button" class="chip ${cur === m ? 'on' : ''}" data-act="pickMonth" data-month="${m}">${esc(monthShort(m))}</button>`).join('')}<button type="button" class="chip ${cur === 'all' ? 'on' : ''}" data-act="pickMonth" data-month="all">All</button></div>`;
+}
+function monthLine() {
+  const cur = curMonth();
+  const inM = S.expenses.filter((e) => inMonth(e.expense_date, cur));
+  const mm = computeAll(S.trip, inM, [], []);
+  const mine = (mm.people.find((p) => p.name === S.me) || {}).share || 0;
+  return `<p class="today">${esc(monthLabel(cur))}: <b>${money(mm.total)}</b> across ${inM.length} expense${inM.length === 1 ? '' : 's'} · your share <b>${money(mine)}</b></p>`;
+}
+
 function expensesTab(all) {
   const sortMode = readStore().prefs.sortMode;
   const today = todayLine(S.expenses, all, S.me, todayIso());
@@ -393,6 +465,7 @@ function expensesTab(all) {
   const cats = [...new Set([...CATEGORIES.map((c) => c.name), ...S.expenses.map((e) => e.category).filter(Boolean)])];
   const people = [...new Set([...(S.trip.members || []), ...S.expenses.map((e) => e.paid_by)])];
   return `
+    ${isTab() ? monthBar() + monthLine() : ''}
     ${estimateAlert(all)}
     ${today ? `<p class="today">Today so far <b>${money(today.total)}</b> · your share <b>${money(today.mine)}</b></p>` : ''}
     <div class="row"><input data-flt="q" placeholder="Search expenses" value="${esc(f.q)}" autocomplete="off"><button class="secondary" data-act="toggleFilters">Filters${(f.who || f.cat || f.mine) ? ' ●' : ''}</button></div>
@@ -478,6 +551,7 @@ function paceBlock(pace, mode) {
 }
 
 function summaryTab(all) {
+  if (isTab()) return tabSummaryTab();
   const t = S.trip; const mode = summaryMode(); const who = mode === 'me' ? S.me : null;
   if (!S.expenses.length) return '<p class="sub">Add a few expenses and this page fills in.</p>';
   const today = todayIso();
@@ -569,7 +643,7 @@ function infoView() {
   const f = S.noteForm;
   return `
     <div class="topbar"><button class="ghost" data-act="back">← Back</button></div>
-    <h1>Trip info</h1>
+    <h1>${isTab() ? 'Notes' : 'Trip info'}</h1>
     <p class="sub">Addresses, flight times, booking references, door codes - everyone on the trip can see and edit these.</p>
     ${f ? `<div class="card">
       <label style="margin-top:0">Title</label><input data-f="noteForm" data-k="title" value="${esc(f.title)}" placeholder="e.g. Airbnb address">
@@ -611,6 +685,7 @@ function personView() {
 
 // ---- Balances (who owes what + settle up)
 function balancesTab(all) {
+  if (isTab()) return tabBalancesTab(all);
   return `
     ${estimateAlert(all)}
     <h2>Who owes what</h2>
@@ -629,6 +704,97 @@ function balancesTab(all) {
       <button class="danger" data-act="undoPay" data-uid="${esc(s.uid)}">Undo</button></div>`).join('')}` : ''}`;
 }
 
+// ---- Running tab: Summary (a month at a time, plus month by month)
+function categoryBlock(sm, total, ink) {
+  return `
+    <h2>Where the money went</h2>
+    <div class="card donutrow">
+      ${donut(sm.byCategory, total, ink)}
+      <div class="legend">${sm.byCategory.map((c, i) => {
+    const cat = CATEGORIES.find((x) => x.name === c.name);
+    return `<div><span><span class="dot" style="background:${PALETTE[i % PALETTE.length]}"></span><i class="ti ti-${cat ? cat.icon : 'dots'}" aria-hidden="true"></i> ${esc(c.name)}</span><span class="num">${money(c.total)}</span></div>`;
+  }).join('')}</div>
+    </div>`;
+}
+function biggestBlock(sm) {
+  if (!sm.biggest.length) return '';
+  return `<h2>Biggest expenses</h2>
+    <div class="card">${sm.biggest.map((b) => `<div class="row" style="padding:6px 0"><div class="tile tn" style="width:34px;height:34px;font-size:18px"><i class="ti ti-${iconFor(b.category, b.subtype)}" aria-hidden="true"></i></div><div class="grow"><b>${esc(b.description)}</b><div class="muted">${esc(b.subtype || b.category || '')}${b.date ? ` · ${esc(fmtShort(b.date))}` : ''}</div></div><b class="num">${money(b.amount)}</b></div>`).join('')}</div>`;
+}
+
+function tabSummaryTab() {
+  const t = S.trip; const mode = summaryMode(); const who = mode === 'me' ? S.me : null;
+  if (!S.expenses.length) return '<p class="sub">Add a few expenses and this page fills in.</p>';
+  const month = curMonth();
+  const exps = S.expenses.filter((e) => inMonth(e.expense_date, month));
+  const allM = computeAll(t, exps, [], []);
+  const sm = summarize({}, exps, allM, todayIso(), who);
+  const meRow = allM.people.find((p) => p.name === S.me);
+  const total = who ? (meRow?.share || 0) : allM.total;
+  const months = monthsWithData(S.expenses, S.settlements, thisMonth());
+  const valueOf = (m) => {
+    const inM = S.expenses.filter((e) => inMonth(e.expense_date, m));
+    const a = computeAll(t, inM, [], []);
+    return who ? ((a.people.find((p) => p.name === S.me) || {}).share || 0) : a.total;
+  };
+  const rows = months.slice(0, 12).map((m) => ({ month: m, value: valueOf(m) }));
+  const maxV = Math.max(1, ...rows.map((r) => r.value));
+  return `
+    ${monthBar()}
+    ${modeToggle()}
+    <div class="card"><div class="muted">${esc(monthLabel(month))}${who ? ' · just your share' : ''}</div>
+      <div class="big num" style="font-size:1.7rem;font-weight:700">${money(total)}</div>
+      <div class="muted">${exps.length} expense${exps.length === 1 ? '' : 's'}${exps.length ? ` · average ${money((allM.total) / exps.length)} each` : ''}</div></div>
+    ${exps.length === 0 ? '<p class="sub">Nothing in this month.</p>' : `
+      ${categoryBlock(sm, total, 'currentColor')}
+      ${biggestBlock(sm)}
+      ${mode === 'all' ? paidVsShareBlock(sm) : coverageBlock(coverage(S.me, exps, allM))}`}
+    <h2>Month by month</h2>
+    <div class="card">${rows.map((r) => `<button type="button" class="mrow ${r.month === month ? 'on' : ''}" data-act="pickMonth" data-month="${r.month}"><span class="ml">${esc(monthShort(r.month))}</span><span class="mb"><span style="width:${Math.max(2, Math.round((r.value / maxV) * 100))}%"></span></span><b class="num">${money(r.value)}</b></button>`).join('')}</div>
+    <p class="muted">Tap a month to look at it.</p>`;
+}
+
+// ---- Running tab: Balances (running balance, payments to confirm, month-end statement)
+function statementMonth() { return S.stmtMonth || prevMonth(thisMonth()); }
+
+function tabBalancesTab(all) {
+  const pend = pendingPayments(S.settlements, S.me);
+  const sm = statementMonth();
+  const st = tabStatement(S.trip, S.expenses, S.settlements, sm);
+  const months = monthsWithData(S.expenses, S.settlements, thisMonth());
+  const stmtMonths = [...new Set([prevMonth(thisMonth()), ...months])].sort().reverse().slice(0, 12);
+  const payRow = (s, buttons) => `<div class="card"><div class="row between"><span>${esc(s.from === S.me ? 'You' : s.from)} said ${s.from === S.me ? 'you' : 'they'} paid ${esc(s.to === S.me ? 'you' : s.to)}</span><b class="num">${money(s.amount_gbp)}</b></div>
+      <div class="muted">${esc(fmtShort(s.settle_date))}${s.notes ? ` · ${esc(s.notes)}` : ''}</div><div class="row" style="margin-top:8px;flex-wrap:wrap">${buttons}</div></div>`;
+  return `
+    ${pend.toConfirm.length ? `<h2>Waiting for you</h2>${pend.toConfirm.map((s) => payRow(s, `<button class="grow" data-act="confirmPay" data-uid="${esc(s.uid)}">Got it</button><button class="secondary" data-act="declinePay" data-uid="${esc(s.uid)}">Haven't received it</button>`)).join('')}` : ''}
+    ${pend.waiting.length ? `<h2>You've paid - waiting for them</h2>${pend.waiting.map((s) => payRow(s, `<span class="muted grow">Waiting for ${esc(s.to)} to tap "Got it"</span><button class="danger" data-act="cancelClaim" data-uid="${esc(s.uid)}">Cancel</button>`)).join('')}` : ''}
+    <h2>Who owes what</h2>
+    <p class="sub">Everything on the tab so far. Payments only count once the person who received them has tapped "Got it".</p>
+    ${all.people.map((p) => `<div class="card tap" data-act="openPerson" data-name="${esc(p.name)}"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)} ›</b>
+      <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
+      <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}</div></div>`).join('')}
+    <h2>Settle up</h2>
+    <p class="sub">The fewest payments that clear everything. Paid someone? Tap "I've paid" and they'll be asked to confirm.</p>
+    ${all.transfers.length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : all.transfers.map((t) => {
+    const mine = t.from === S.me; const toMe = t.to === S.me;
+    return `<div class="card"><div class="row between"><span><b>${esc(mine ? 'You' : t.from)}</b> pay${mine ? '' : 's'} <b>${esc(toMe ? 'you' : t.to)}</b></span><b class="num">${money(t.amount_gbp)}</b></div>
+      ${mine ? `<div style="height:8px"></div><button class="secondary" data-act="claimPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">I've paid this</button>`
+    : toMe ? `<div style="height:8px"></div><button class="secondary" data-act="receivedPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">${esc(t.from)} has paid me</button>` : ''}</div>`;
+  }).join('')}
+    <div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="secondary" data-act="payFor">Record a different amount</button></div>
+    <h2>Month-end statement</h2>
+    <p class="sub">Who owes whom at the end of a month, ready to send to the group chat.</p>
+    <div class="chips mbar">${stmtMonths.map((m) => `<button type="button" class="chip ${sm === m ? 'on' : ''}" data-act="pickStmt" data-month="${m}">${esc(monthShort(m))}</button>`).join('')}</div>
+    <div class="card"><b>${esc(st.label)}</b>
+      <div class="muted">Spent ${money(st.monthTotal)} across ${st.monthCount} expense${st.monthCount === 1 ? '' : 's'}</div>
+      ${st.transfers.length === 0 ? '<p style="margin:8px 0 0">Everyone was all square.</p>' : st.transfers.map((x) => `<div class="row between" style="padding:4px 0"><span><b>${esc(x.from)}</b> pays <b>${esc(x.to)}</b></span><b class="num">${money(x.amount_gbp)}</b></div>`).join('')}
+      ${st.waiting.length ? `<p class="muted" style="margin:6px 0 0">Already paid, waiting to be confirmed: ${st.waiting.map((x) => `${esc(x.from)} → ${esc(x.to)} ${money(x.amount_gbp)}`).join(', ')}</p>` : ''}</div>
+    <button class="full" data-act="sendStatement">Send this statement on WhatsApp</button>
+    ${S.settlements.length ? `<h2>Payments recorded</h2>${S.settlements.slice().sort((a, b) => String(b.settle_date).localeCompare(String(a.settle_date))).map((s) => `
+      <div class="row between" style="padding:6px 0"><span>${esc(s.settle_date ? `${fmtShort(s.settle_date)} · ` : '')}${esc(s.from)} paid ${esc(s.to)} <b class="num">${money(s.amount_gbp)}</b>${s.status === 'claimed' ? ' <b class="neg">· not confirmed yet</b>' : ''}${s.notes ? `<span class="muted"> · ${esc(s.notes)}</span>` : ''}</span>
+      <button class="danger" data-act="undoPay" data-uid="${esc(s.uid)}">Undo</button></div>`).join('')}` : ''}`;
+}
+
 // ---- More
 function moreTab() {
   const t = S.trip;
@@ -636,30 +802,30 @@ function moreTab() {
   const hasOwner = !!t.owner_hash;
   return `
     <h2>Invite friends</h2>
-    <p class="sub">Anyone with this link sees and edits the trip. They tap their name the first time they open it.</p>
+    <p class="sub">Anyone with this link sees and edits the ${noun()}. They tap their name the first time they open it.</p>
     <div class="card"><div class="muted" style="word-break:break-all">${esc(tripLink())}</div></div>
     <div class="row"><button class="grow" data-act="shareLink">Share the link</button><button class="secondary" data-act="copyLink">Copy</button></div>
-    <h2>People on this trip</h2>
+    <h2>People on this ${noun()}</h2>
     <div class="chips">${(t.members || []).map((m) => `<button type="button" class="chip ${m === S.me ? 'on' : ''}" data-act="rename" data-name="${esc(m)}">${esc(m)} ✎</button>`).join('')}</div>
     <p class="muted">Tap a name to rename it everywhere - handy for a typo, or to change "Me" to your real name.</p>
     <div class="row"><input id="addPerson" placeholder="Add someone"><button data-act="addPerson">Add</button></div>
-    <h2>Trip</h2>
+    <h2>${isTab() ? 'Tab' : 'Trip'}</h2>
     <div class="menu">
-      <button data-act="openInfo"><i class="ti ti-info-circle" aria-hidden="true"></i><span>Trip info<small>Addresses, flight times, booking references</small></span></button>
-      <button data-act="openRecap"><i class="ti ti-photo" aria-hidden="true"></i><span>Trip summary<small>One page to look back on, with Share as picture</small></span></button>
+      <button data-act="openInfo"><i class="ti ti-info-circle" aria-hidden="true"></i><span>${isTab() ? 'Notes' : 'Trip info'}<small>${isTab() ? 'Anything worth keeping handy for the group' : 'Addresses, flight times, booking references'}</small></span></button>
+      ${isTab() ? '' : `<button data-act="openRecap"><i class="ti ti-photo" aria-hidden="true"></i><span>Trip summary<small>One page to look back on, with Share as picture</small></span></button>`}
       <button data-act="openActivity"><i class="ti ti-bell" aria-hidden="true"></i><span>Activity<small>Everything that changed, and who changed it</small></span></button>
-      <button data-act="editTrip"><i class="ti ti-pencil" aria-hidden="true"></i><span>Edit trip<small>Name, dates, currency, rate, budget and theme</small></span></button>
-      <button data-act="openCarry"><i class="ti ti-arrow-big-right-lines" aria-hidden="true"></i><span>Settle this trip into another trip<small>Close it and move who-owes-what to another trip</small></span></button>
-      <button data-act="openCombo"><i class="ti ti-arrows-exchange" aria-hidden="true"></i><span>Settle several trips together<small>Add up balances across trips, e.g. Naples and Oxford</small></span></button>
-      <button data-act="exportFile"><i class="ti ti-download" aria-hidden="true"></i><span>Save trip file<small>For the desktop app - also a handy backup</small></span></button>
+      <button data-act="editTrip"><i class="ti ti-pencil" aria-hidden="true"></i><span>${isTab() ? 'Edit tab' : 'Edit trip'}<small>${isTab() ? 'Name and theme' : 'Name, dates, currency, rate, budget and theme'}</small></span></button>
+      ${isTab() ? '' : `<button data-act="openCarry"><i class="ti ti-arrow-big-right-lines" aria-hidden="true"></i><span>Settle this trip into another trip<small>Close it and move who-owes-what to another trip</small></span></button>
+      <button data-act="openCombo"><i class="ti ti-arrows-exchange" aria-hidden="true"></i><span>Settle several trips together<small>Add up balances across trips, e.g. Naples and Oxford</small></span></button>`}
+      <button data-act="exportFile"><i class="ti ti-download" aria-hidden="true"></i><span>${isTab() ? 'Save tab file' : 'Save trip file'}<small>For the desktop app - also a handy backup</small></span></button>
     </div>
     <h2>Your phone</h2>
     <button class="ghost" data-act="changeMe">I'm not ${esc(S.me)} - change who I am</button>
-    <button class="danger" data-act="forget" data-code="${esc(S.code)}">Remove this trip from my phone</button>
+    <button class="danger" data-act="forget" data-code="${esc(S.code)}">Remove this ${noun()} from my phone</button>
     <h2>Danger zone</h2>
-    ${S.isOwner ? '<p class="sub">You created this trip. Deleting it removes it for everyone, for good.</p><button class="dangerbtn full" data-act="deleteTrip">Delete this trip for everyone</button>'
-    : hasOwner ? '<p class="sub">Only the person who created this trip can delete it for everyone.</p>'
-      : `<p class="sub">This trip has no creator yet. If you created it, tap below. Only the first person to tap becomes the creator, so do it now.</p><button class="secondary full" data-act="claimOwner">I'm the creator of this trip</button>`}`;
+    ${S.isOwner ? `<p class="sub">You created this ${noun()}. Deleting it removes it for everyone, for good.</p><button class="dangerbtn full" data-act="deleteTrip">Delete this ${noun()} for everyone</button>`
+    : hasOwner ? `<p class="sub">Only the person who created this ${noun()} can delete it for everyone.</p>`
+      : `<p class="sub">This ${noun()} has no creator yet. If you created it, tap below. Only the first person to tap becomes the creator, so do it now.</p><button class="secondary full" data-act="claimOwner">I'm the creator of this ${noun()}</button>`}`;
 }
 
 // ---- Activity
@@ -780,11 +946,12 @@ function formView() {
     <div class="cats">${CATEGORIES.map((c) => `<button type="button" class="catbtn ${f.category === c.name ? 'on' : ''}" data-act="pickCat" data-name="${esc(c.name)}"><span class="ctile"><i class="ti ti-${c.icon}" aria-hidden="true"></i></span>${esc(c.name)}</button>`).join('')}</div>
     ${f.category && !CATEGORIES.some((c) => c.name === f.category) ? `<p class="muted">Old category: ${esc(f.category)} - pick one above to change it.</p>` : ''}
     ${(CATEGORIES.find((c) => c.name === f.category)?.subs || []).length ? `<p class="muted" style="margin:10px 0 6px">${esc(f.category)} - what was it?</p><div class="chips">${CATEGORIES.find((c) => c.name === f.category).subs.map(([n, ic]) => `<button type="button" class="chip ${f.subtype === n ? 'on' : ''}" data-act="pickSub" data-name="${esc(n)}"><i class="ti ti-${ic}" aria-hidden="true"></i>${esc(n)}</button>`).join('')}</div>` : ''}
-    <label>Amount in pounds (£) - leave empty if you only know the ${esc(t.currency)} amount</label>
+    ${isTab() ? `<label>Amount (£)</label>
+    <input id="f_amount_gbp" inputmode="decimal" value="${esc(f.amount_gbp)}" placeholder="0.00">` : `<label>Amount in pounds (£) - leave empty if you only know the ${esc(t.currency)} amount</label>
     <input id="f_amount_gbp" inputmode="decimal" value="${esc(f.amount_gbp)}" placeholder="0.00">
     <label>Amount in ${esc(f.orig_currency)} (optional)</label>
     <input id="f_orig_amount" inputmode="decimal" value="${esc(f.orig_amount)}" placeholder="0.00">
-    <div id="estHint"></div>
+    <div id="estHint"></div>`}
     <label>Who paid?</label>
     <select id="f_paid_by">${members.map((m) => `<option ${m === f.paid_by ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
     <label>How is it split?</label>
@@ -891,6 +1058,8 @@ async function saveExpense() {
       if (changes.length) logActivity(activityLine('edited', S.me, `"${S.form.original.description}"`, changes.join(', ')), 'edited');
     }
     patchStore((s) => { s.defaults[S.code] = { split_type: e.split_type, who: e.participants.map((p) => p.name) }; });
+    // on a running tab, jump to the month the expense belongs to so it is visible straight away
+    if (isTab() && e.expense_date) S.month = e.expense_date.slice(0, 7);
     S.form = null; S.view = 'trip';
   } catch (err) {
     S.error = err.message;
@@ -930,9 +1099,11 @@ function savePay() {
   const by = readStore().trips[p.code]?.me || S.me;
   const existing = p.id ? (S.settlements.find((s) => s.uid === p.id) || {}) : {};
   const uid = p.id || newUid();
+  // On a running tab a payment only counts once the person it went to has said they got it (if that's me, it counts straight away).
+  const status = isTab() && p.code === S.code ? (p.to === by ? 'confirmed' : 'claimed') : undefined;
   fireAndForget(setDoc(refFor(p.code, 'settlements', uid), clean({
     from: p.from, to: p.to, amount_gbp: amount, settle_date: p.date || null, notes: p.note.trim() || null,
-    created_at: existing.created_at || new Date().toISOString(), by,
+    created_at: existing.created_at || new Date().toISOString(), by, ...(status ? { status } : {}),
   })));
   logActivity(activityLine('payment', by, `${p.from} paid ${p.to} ${money(amount)}${p.id ? ' (edited)' : ''}`), 'payment', p.code, by);
   const back = p.back; S.pay = null;
@@ -943,6 +1114,7 @@ function savePay() {
 // ---------------------------------------------------------------- edit trip
 function editFromTrip() {
   const t = S.trip;
+  if (isTab()) return { name: t.name || '', theme: themeState(t.theme) };
   return {
     name: t.name || '', destination: t.destination || '', start_date: t.start_date || '', end_date: t.end_date || '',
     currency: t.currency || 'EUR', default_rate: t.default_rate ?? '', budget_gbp: t.budget_gbp ?? '', theme: themeState(t.theme),
@@ -951,15 +1123,20 @@ function editFromTrip() {
 function editView() {
   return `
     <div class="topbar"><button class="ghost" data-act="back">← Cancel</button></div>
-    <h1>Edit trip</h1>
-    ${tripFields('edit')}
+    <h1>${isTab() ? 'Edit tab' : 'Edit trip'}</h1>
+    ${isTab() ? `<label>Name of the tab</label><input data-f="edit" data-k="name" value="${esc(S.edit.name)}">${themePicker('edit')}` : tripFields('edit')}
     ${S.error ? `<p class="error">${esc(S.error)}</p>` : ''}
     <div style="height:14px"></div>
     <button class="full" data-act="saveEdit">Save</button>`;
 }
 function saveEdit() {
   const x = S.edit; S.error = '';
-  if (!x.name.trim()) { S.error = 'Give the trip a name.'; render(); return; }
+  if (!x.name.trim()) { S.error = `Give the ${noun()} a name.`; render(); return; }
+  if (isTab()) {
+    fireAndForget(setDoc(tripRef(), clean({ name: x.name.trim(), theme: themeValue(x.theme) }), { merge: true }));
+    logActivity(activityLine('trip', S.me, 'changed the tab details'), 'trip');
+    S.edit = null; S.view = 'trip'; S.tab = 'more'; render(); return;
+  }
   const rate = Number(x.default_rate) > 0 ? Number(x.default_rate) : null;
   const upd = {
     name: x.name.trim(), destination: x.destination.trim() || null, start_date: x.start_date || null, end_date: x.end_date || null,
@@ -1031,6 +1208,23 @@ async function createBlank() {
     default_rate: Number(x.default_rate) > 0 ? Number(x.default_rate) : null, budget_gbp: Number(x.budget_gbp) > 0 ? Number(x.budget_gbp) : null,
     theme: themeValue(x.theme), notes: null, my_name: me, members, member_ids: Object.fromEntries(members.map((n) => [n, newUid()])), owner_hash: owner.hash, created_at: new Date().toISOString(),
   })));
+  chooseMeAndOpen(code, me, owner.token);
+}
+
+async function createTab() {
+  const x = S.nt; S.error = '';
+  if (!x.name.trim() || !x.me.trim()) { S.error = 'Give the tab a name and say who you are.'; render(); return; }
+  const me = x.me.trim();
+  const friends = x.friends.split(',').map((n) => n.trim()).filter(Boolean);
+  const members = Array.from(new Set([me, ...friends]));
+  const code = newCode();
+  const owner = await ownerFields();
+  fireAndForget(setDoc(doc(db, 'trips', code), clean({
+    uid: newUid(), kind: 'tab', name: x.name.trim(), destination: null, start_date: null, end_date: null, status: 'Open', currency: 'GBP',
+    default_rate: null, budget_gbp: null, theme: themeValue(x.theme), notes: null, my_name: me, members,
+    member_ids: Object.fromEntries(members.map((n) => [n, newUid()])), owner_hash: owner.hash, created_at: new Date().toISOString(),
+  })));
+  patchStore((st) => { st.trips[code] = { ...(st.trips[code] || {}), name: x.name.trim(), kind: 'tab' }; });
   chooseMeAndOpen(code, me, owner.token);
 }
 
@@ -1142,7 +1336,7 @@ function carryBanner(all) {
 
 function carryView() {
   const c = S.carry;
-  const others = Object.entries(readStore().trips).filter(([code]) => code !== S.code);
+  const others = Object.entries(readStore().trips).filter(([code, t]) => code !== S.code && t.kind !== 'tab');
   if (c.step === 'pick') {
     return `
       <div class="topbar"><button class="ghost" data-act="carryBack">← Back</button></div>
@@ -1223,7 +1417,7 @@ function undoAdj() {
 function comboView() {
   const c = S.combo;
   const store = readStore();
-  const known = Object.entries(store.trips);
+  const known = Object.entries(store.trips).filter(([, t]) => t.kind !== 'tab');
   if (c.step === 'pick') {
     return `
       <div class="topbar"><button class="ghost" data-act="comboBack">← Back</button></div>
@@ -1278,7 +1472,7 @@ document.addEventListener('click', async (ev) => {
   S.error = ''; S.notice = '';
   const f = S.form;
   switch (act) {
-    case 'home': location.hash = ''; S.view = 'home'; leaveTrip(); render(); break;
+    case 'home': location.hash = ''; S.view = 'home'; leaveTrip(); render(); loadHomeBadges(); break;
     case 'back': S.view = 'trip'; S.edit = null; S.person = null; S.noteForm = null; render(); break;
     case 'open': location.hash = `t=${d.code}`; break;
     case 'forget':
@@ -1296,6 +1490,44 @@ document.addEventListener('click', async (ev) => {
       break;
     }
     case 'startNew': S.view = 'new'; S.newMode = 'file'; S.nt = blankNew(); render(); break;
+    case 'startTab': S.view = 'newtab'; S.nt = blankNew(); render(); break;
+    case 'createTab': await createTab(); break;
+    case 'pickMonth': S.month = d.month; render(); break;
+    case 'pickStmt': S.stmtMonth = d.month; render(); break;
+    case 'sendStatement': {
+      const st = tabStatement(S.trip, S.expenses, S.settlements, S.stmtMonth || prevMonth(thisMonth()));
+      const text = statementMessage(S.trip.name, st, tripLink());
+      if (navigator.share) { try { await navigator.share({ text }); } catch { /* cancelled */ } }
+      else window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
+      break;
+    }
+    case 'claimPaid': case 'receivedPaid': {
+      const mine = act === 'claimPaid';
+      const amount = Math.round(Number(d.amt) * 100) / 100;
+      const uid = newUid(); const now = new Date().toISOString();
+      fireAndForget(setDoc(tripRef('settlements', uid), clean({ from: d.from, to: d.to, amount_gbp: amount, settle_date: todayIso(), notes: null, created_at: now, by: S.me, status: mine ? 'claimed' : 'confirmed', ...(mine ? {} : { confirmed_by: S.me, confirmed_at: now }) })));
+      logActivity(mine ? `${S.me} says they paid ${d.to} ${money(amount)} - waiting for ${d.to} to confirm` : `${S.me} confirmed that ${d.from} paid ${money(amount)}`, 'payment');
+      S.notice = mine ? `Sent. ${d.to} will be asked to confirm it.` : 'Recorded.'; render(); break;
+    }
+    case 'confirmPay': {
+      const s = S.settlements.find((x) => x.uid === d.uid); if (!s) break;
+      fireAndForget(updateDoc(tripRef('settlements', d.uid), { status: 'confirmed', confirmed_by: S.me, confirmed_at: new Date().toISOString() }));
+      logActivity(`${S.me} confirmed ${s.from}'s payment of ${money(s.amount_gbp)}`, 'payment');
+      S.notice = 'Confirmed - the balance is updated.'; render(); break;
+    }
+    case 'declinePay': {
+      const s = S.settlements.find((x) => x.uid === d.uid); if (!s) break;
+      if (!confirm(`Tell ${s.from} you haven't received ${money(s.amount_gbp)}? Their payment is removed so you can sort it out together.`)) break;
+      fireAndForget(deleteDoc(tripRef('settlements', d.uid)));
+      logActivity(`${S.me} hasn't received the ${money(s.amount_gbp)} that ${s.from} said they paid`, 'payment-undone');
+      render(); break;
+    }
+    case 'cancelClaim': {
+      const s = S.settlements.find((x) => x.uid === d.uid); if (!s) break;
+      fireAndForget(deleteDoc(tripRef('settlements', d.uid)));
+      logActivity(`${S.me} cancelled their ${money(s.amount_gbp)} payment to ${s.to}`, 'payment-undone');
+      render(); break;
+    }
     case 'newMode': S.newMode = d.mode; S.error = ''; render(); break;
     case 'createBlank': await createBlank(); break;
     case 'iAm': setMe(d.name); break;
@@ -1519,3 +1751,4 @@ document.addEventListener('change', (ev) => {
 
 routeFromHash();
 render();
+loadHomeBadges();
