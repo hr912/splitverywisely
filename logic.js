@@ -122,8 +122,9 @@ export function computeAll(trip, expenses, settlements, adjustments = []) {
     const cat = e.category || 'Uncategorised';
     byCategory[cat] = (byCategory[cat] || 0) + amt;
   });
-  // A payment someone says they made (running tabs) only counts once the person it went to has confirmed it.
-  settlements.filter((s) => !s.status || s.status === 'confirmed').forEach((s) => {
+  // A payment someone says they made (running tabs) counts straight away (it is shown as not yet confirmed), and comes off again if the
+  // person it went to says they haven't received it ("disputed").
+  settlements.filter((s) => s.status !== 'disputed').forEach((s) => {
     const a = toPence(s.amount_gbp);
     settled[s.from] = (settled[s.from] || 0) + a;
     settled[s.to] = (settled[s.to] || 0) - a;
@@ -155,7 +156,7 @@ export function pairwiseTransfers(trip, expenses, settlements) {
     if (!s) return;
     Object.entries(s).forEach(([n, p]) => { if (n !== e.paid_by && p > 0) add(n, e.paid_by, p); });
   });
-  settlements.filter((x) => !x.status || x.status === 'confirmed').forEach((x) => add(x.from, x.to, -toPence(x.amount_gbp)));
+  settlements.filter((x) => x.status !== 'disputed').forEach((x) => add(x.from, x.to, -toPence(x.amount_gbp)));
   const list = [...names].sort();
   const out = [];
   for (let i = 0; i < list.length; i += 1) {

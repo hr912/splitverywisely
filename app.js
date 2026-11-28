@@ -74,7 +74,7 @@ function owesLines(name, transfers) {
 // Payments someone has said they made that the other person hasn't confirmed yet.
 const pendingSum = (from, to) => S.settlements.filter((x) => x.status === 'claimed' && x.from === from && x.to === to).reduce((t, x) => t + Number(x.amount_gbp), 0);
 function pendingLines(name) {
-  const lines = S.settlements.filter((x) => x.status === 'claimed' && (x.from === name)).map((x) => `${name === S.me ? 'You' : name} paid ${x.to === S.me ? 'you' : x.to} ${money(x.amount_gbp)} - waiting for ${x.to === S.me ? 'you' : x.to} to confirm`);
+  const lines = S.settlements.filter((x) => x.status === 'claimed' && (x.from === name)).map((x) => `${name === S.me ? 'You' : name} paid ${x.to === S.me ? 'you' : x.to} ${money(x.amount_gbp)} - counted, waiting for ${x.to === S.me ? 'you' : x.to} to confirm`);
   return lines.length ? `<div class="owes neg">${lines.map(esc).join('<br>')}</div>` : '';
 }
 function balanceToggle() {
@@ -394,12 +394,13 @@ function tripView() {
     ${S.notice ? `<div class="alert">${esc(S.notice)}</div>` : ''}
     ${S.error ? `<p class="error">${esc(S.error)}</p>` : ''}
     ${pend && pend.toConfirm.length && S.tab !== 'balances' ? `<button class="alert tapalert" data-act="tab" data-tab="balances"><b>${pend.toConfirm.length} payment${pend.toConfirm.length === 1 ? '' : 's'} waiting for you to confirm</b> - tap to see</button>` : ''}
+    ${pend && pend.disputedMine.length && S.tab !== 'balances' ? `<button class="alert tapalert" data-act="tab" data-tab="balances"><b>${pend.disputedMine.length} payment${pend.disputedMine.length === 1 ? '' : 's'} you sent ${pend.disputedMine.length === 1 ? 'was' : 'were'} marked as not received</b> - tap to see</button>` : ''}
     ${tab ? '' : carryBanner(all)}
     ${body}
     ${S.tab === 'expenses' ? '<div class="fabs"><button class="secondary" data-act="addReceipt">From a receipt</button><button data-act="addExpense">+ Add expense</button></div>' : ''}
     <nav class="tabs">
       ${[['expenses', 'Expenses', 'receipt-2'], ['summary', 'Summary', 'chart-pie'], ['balances', 'Balances', 'scale'], ['more', 'More', 'dots']]
-    .map(([k, l, ic]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}"><i class="ti ti-${ic}" aria-hidden="true"></i><span>${l}</span>${k === 'balances' && pend && pend.toConfirm.length ? `<span class="dotn">${pend.toConfirm.length}</span>` : ''}</button>`).join('')}
+    .map(([k, l, ic]) => `<button class="${S.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}"><i class="ti ti-${ic}" aria-hidden="true"></i><span>${l}</span>${k === 'balances' && pend && (pend.toConfirm.length + pend.disputedMine.length) ? `<span class="dotn">${pend.toConfirm.length + pend.disputedMine.length}</span>` : ''}</button>`).join('')}
     </nav>`;
 }
 
@@ -436,7 +437,7 @@ function rowHtml(r, all) {
   }
   if (r.kind === 'payment') {
     const s = r.s;
-    return `<button class="ex pay" data-act="editPayment" data-uid="${esc(s.uid)}"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} <b>${money(s.amount_gbp)}</b></p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment${s.status === 'claimed' ? ' · <b class="neg">waiting for confirmation</b>' : ''}${s.notes ? ` · ${esc(s.notes)}` : ''}</p></div></button>`;
+    return `<button class="ex pay" data-act="editPayment" data-uid="${esc(s.uid)}"><div class="tile tg"><i class="ti ti-cash" aria-hidden="true"></i></div><div class="mid"><p class="t" style="font-weight:400">${esc(s.from === S.me ? 'You' : s.from)} paid ${esc(s.to === S.me ? 'you' : s.to)} <b>${money(s.amount_gbp)}</b></p><p class="s">${esc(fmtShort(s.settle_date))}${s.settle_date ? ' · ' : ''}Payment${s.status === 'claimed' ? ' · <b class="neg">waiting for confirmation</b>' : s.status === 'disputed' ? ' · <b class="neg">not received - not counted</b>' : ''}${s.notes ? ` · ${esc(s.notes)}` : ''}</p></div></button>`;
   }
   const e = r.e;
   const mineP = (all.shareByExpense[e.uid] || {})[S.me];
@@ -807,9 +808,11 @@ function tabBalancesTab(all) {
   return `
     ${pend.toConfirm.length ? `<h2>Waiting for you</h2>${pend.toConfirm.map((s) => payRow(s, `<button class="grow" data-act="confirmPay" data-uid="${esc(s.uid)}">Got it</button><button class="secondary" data-act="declinePay" data-uid="${esc(s.uid)}">Haven't received it</button>`)).join('')}` : ''}
     ${pend.waiting.length ? `<h2>You've paid - waiting for them</h2>${pend.waiting.map((s) => payRow(s, `<span class="muted grow">Waiting for ${esc(s.to)} to tap "Got it"</span><button class="danger" data-act="cancelClaim" data-uid="${esc(s.uid)}">Cancel</button>`)).join('')}` : ''}
+    ${pend.disputedMine.length ? `<h2>Marked as not received</h2>${pend.disputedMine.map((s) => payRow(s, `<span class="muted grow">${esc(s.to)} says this hasn't arrived - check with them. It is not counted.</span><button class="danger" data-act="cancelClaim" data-uid="${esc(s.uid)}">Delete it</button>`)).join('')}` : ''}
+    ${pend.disputedToMe.length ? `<h2>You said you haven't received</h2>${pend.disputedToMe.map((s) => payRow(s, `<button class="grow" data-act="confirmPay" data-uid="${esc(s.uid)}">It arrived - Got it</button><button class="danger" data-act="cancelClaim" data-uid="${esc(s.uid)}">Delete it</button>`)).join('')}` : ''}
     ${balanceToggle()}
     <h2>Who owes what</h2>
-    <p class="sub">Everything on the tab so far. Payments only count once the person who received them has tapped "Got it".</p>
+    <p class="sub">Everything on the tab so far. A payment someone says they've made is counted straight away and marked until the other person taps "Got it" - if they say they haven't received it, it comes off again.</p>
     ${all.people.map((p) => `<div class="card tap" data-act="openPerson" data-name="${esc(p.name)}"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)} ›</b>
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
       ${owesLines(p.name, transfersFor(all))}${pendingLines(p.name)}
@@ -819,15 +822,14 @@ function tabBalancesTab(all) {
     ${transfersFor(all).length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : transfersFor(all).map((t) => {
     const mine = t.from === S.me; const toMe = t.to === S.me;
     const pend = pendingSum(t.from, t.to);
-    const rem = Math.round((t.amount_gbp - pend) * 100) / 100;
     let action = '';
     if (mine) {
-      if (pend > 0.004) action += `<p class="muted" style="margin:8px 0 0"><b>${money(pend)}</b> sent - waiting for ${esc(t.to)} to confirm</p>`;
-      if (rem > 0.004) action += `<div style="height:8px"></div><button class="secondary" data-act="claimPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${rem.toFixed(2)}">${pend > 0.004 ? `I've also paid the other ${money(rem)}` : "I've paid this"}</button>`;
+      if (pend > 0.004) action += `<p class="muted" style="margin:8px 0 0">You've already sent ${money(pend)} (counted, waiting for ${esc(t.to)} to confirm).</p>`;
+      action += `<div style="height:8px"></div><button class="secondary" data-act="claimPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">${pend > 0.004 ? "I've paid this too" : "I've paid this"}</button>`;
     } else if (toMe) {
       const claim = S.settlements.find((x) => x.status === 'claimed' && x.from === t.from && x.to === S.me);
       action = claim
-        ? `<p class="muted" style="margin:8px 0 0">${esc(t.from)} says they paid you <b>${money(pend)}</b>.</p><div style="height:8px"></div><button data-act="confirmPay" data-uid="${esc(claim.uid)}">Got it</button>`
+        ? `<p class="muted" style="margin:8px 0 0">${esc(t.from)} says they've already paid you <b>${money(pend)}</b> (counted - tap Got it when it arrives).</p><div style="height:8px"></div><button data-act="confirmPay" data-uid="${esc(claim.uid)}">Got it</button>`
         : `<div style="height:8px"></div><button class="secondary" data-act="receivedPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">${esc(t.from)} has paid me</button>`;
     }
     return `<div class="card"><div class="row between"><span><b>${esc(mine ? 'You' : t.from)}</b> pay${mine ? '' : 's'} <b>${esc(toMe ? 'you' : t.to)}</b></span><b class="num">${money(t.amount_gbp)}</b></div>${action}</div>`;
@@ -842,7 +844,7 @@ function tabBalancesTab(all) {
       ${st.waiting.length ? `<p class="muted" style="margin:6px 0 0">Already paid, waiting to be confirmed: ${st.waiting.map((x) => `${esc(x.from)} → ${esc(x.to)} ${money(x.amount_gbp)}`).join(', ')}</p>` : ''}</div>
     <button class="full" data-act="sendStatement">Send this statement on WhatsApp</button>
     ${S.settlements.length ? `<h2>Payments recorded</h2>${S.settlements.slice().sort((a, b) => String(b.settle_date).localeCompare(String(a.settle_date))).map((s) => `
-      <div class="row between" style="padding:6px 0"><span>${esc(s.settle_date ? `${fmtShort(s.settle_date)} · ` : '')}${esc(s.from)} paid ${esc(s.to)} <b class="num">${money(s.amount_gbp)}</b>${s.status === 'claimed' ? ' <b class="neg">· not confirmed yet</b>' : ''}${s.notes ? `<span class="muted"> · ${esc(s.notes)}</span>` : ''}</span>
+      <div class="row between" style="padding:6px 0"><span>${esc(s.settle_date ? `${fmtShort(s.settle_date)} · ` : '')}${esc(s.from)} paid ${esc(s.to)} <b class="num">${money(s.amount_gbp)}</b>${s.status === 'claimed' ? ' <b class="neg">· not confirmed yet</b>' : s.status === 'disputed' ? ' <b class="neg">· marked as not received</b>' : ''}${s.notes ? `<span class="muted"> · ${esc(s.notes)}</span>` : ''}</span>
       <button class="danger" data-act="undoPay" data-uid="${esc(s.uid)}">Undo</button></div>`).join('')}` : ''}`;
 }
 
@@ -1690,8 +1692,8 @@ document.addEventListener('click', async (ev) => {
     }
     case 'declinePay': {
       const s = S.settlements.find((x) => x.uid === d.uid); if (!s) break;
-      if (!confirm(`Tell ${s.from} you haven't received ${money(s.amount_gbp)}? Their payment is removed so you can sort it out together.`)) break;
-      fireAndForget(deleteDoc(tripRef('settlements', d.uid)));
+      if (!confirm(`Tell ${s.from} you haven't received ${money(s.amount_gbp)}? It stops counting, and they'll see it marked as not received. If it turns up later you can still tap Got it.`)) break;
+      fireAndForget(updateDoc(tripRef('settlements', d.uid), { status: 'disputed', disputed_by: S.me, disputed_at: new Date().toISOString() }));
       logActivity(`${S.me} hasn't received the ${money(s.amount_gbp)} that ${s.from} said they paid`, 'payment-undone');
       render(); break;
     }

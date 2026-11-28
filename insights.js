@@ -353,10 +353,13 @@ export function monthTotals(expenses, months, limit = 12) {
 // Payments someone says they made that are still waiting for the receiver: those I must confirm, and those I'm waiting on.
 export function pendingPayments(settlements, me) {
   const claimed = settlements.filter((s) => s.status === 'claimed');
+  const disputed = settlements.filter((s) => s.status === 'disputed');
   return {
     toConfirm: claimed.filter((s) => s.to === me),
     waiting: claimed.filter((s) => s.from === me),
     others: claimed.filter((s) => s.from !== me && s.to !== me),
+    disputedMine: disputed.filter((s) => s.from === me),
+    disputedToMe: disputed.filter((s) => s.to === me),
   };
 }
 
@@ -384,7 +387,7 @@ export function statementMessage(tabName, st, link) {
     st.transfers.forEach((t) => lines.push(`${t.from} pays ${t.to} ${fmt(t.amount_gbp)}`));
   }
   if (st.waiting.length) {
-    lines.push('', 'Already paid, waiting for the other person to confirm:');
+    lines.push('', 'Already paid and counted above, waiting for the other person to confirm:');
     st.waiting.forEach((s) => lines.push(`${s.from} -> ${s.to} ${fmt(s.amount_gbp)}`));
   }
   lines.push('', 'Once you have paid, tap "I\'ve paid" in the app. The person you paid taps "Got it" when it arrives.');
