@@ -1,7 +1,7 @@
 // Keeps the app opening with no signal. The shell files are cached; the
 // Firebase scripts are cached the first time they load. Trip data itself is
 // kept offline by Firestore, not here.
-const VERSION = 'svw-14';
+const VERSION = 'svw-15';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'trip-math.js', 'logic.js', 'categories.js', 'theme.js', 'insights.js', 'firebase-config.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

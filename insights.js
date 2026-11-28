@@ -185,6 +185,13 @@ export function findDuplicate(expenses, cand) {
 
 // Who had what on an itemised receipt: every person's items, their share of the extras (service, VAT, tip)
 // and their total - in the receipt's own currency, plus the pounds when they are known.
+// How much the discounts on a receipt saved: each item's "was" (original) price less what was charged.
+export function savedOf(e) {
+  const items = Array.isArray(e.items) ? e.items : [];
+  const saved = items.reduce((t, i) => (Number(i.was) > Number(i.amount) ? t + (Number(i.was) - Number(i.amount)) : t), 0);
+  return { saved: Math.round(saved * 100) / 100, local: items.some((i) => i.in_local) };
+}
+
 export function itemisedBreakdown(e, members = []) {
   const items = effectiveItems(e).filter((i) => Number(i.amount) > 0);
   if (!items.length) return { empty: true };
@@ -202,7 +209,7 @@ export function itemisedBreakdown(e, members = []) {
     const part = allocate(toPence(i.amount), names.map((id) => ({ id, weight: 1 })), payer);
     Object.entries(part).forEach(([n, p]) => {
       (people[n] ||= { name: n, pieces: [], subtotal: 0 });
-      people[n].pieces.push({ description: i.description, amount: toPounds(p), count: names.length, sharedWith: names.filter((x) => x !== n) });
+      people[n].pieces.push({ description: i.description, amount: toPounds(p), count: names.length, sharedWith: names.filter((x) => x !== n), was: Number(i.was) > Number(i.amount) ? Number(i.was) : null });
       people[n].subtotal += p;
     });
   });
@@ -230,7 +237,7 @@ export function itemisedBreakdown(e, members = []) {
   return {
     cur, local, total: toPounds(totalPence), itemsSum: toPounds(itemsPence), extras: extrasPounds,
     extrasPct: itemsPence ? Math.round((extrasPence / itemsPence) * 1000) / 10 : 0,
-    extraLabels, people: list, unassigned, over,
+    extraLabels, people: list, unassigned, over, saved: savedOf({ items }).saved,
     balanced: !over && !unassigned.length && assignedTotal === totalPence, gbpByName,
   };
 }

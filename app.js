@@ -9,7 +9,7 @@ import {
 } from './logic.js';
 import {
   itemisedBreakdown, summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex, buildCarryOver,
-  coverage, paceInfo, todayLine, filterRows, buildRecap,
+  coverage, paceInfo, todayLine, filterRows, buildRecap, savedOf,
   monthLabel, monthShort, monthEnd, inMonth, prevMonth, monthsWithData, monthTotals, pendingPayments, tabStatement, statementMessage,
 } from './insights.js';
 import { CATEGORIES, iconFor } from './categories.js';
@@ -446,7 +446,7 @@ function rowHtml(r, all) {
       <div class="tile t${tone}"><i class="ti ti-${iconFor(e.category, e.subtype)}" aria-hidden="true"></i></div>
       <div class="mid"><p class="t">${esc(e.description)}</p>
         <p class="s">${esc(fmtShort(e.expense_date))}${e.expense_date ? ' · ' : ''}${esc(iPaid ? 'You paid' : `${e.paid_by} paid`)}${what ? ` · ${esc(what)}` : ''}${e.gbp_estimated ? '<span class="est">est. £</span>' : ''}</p>
-        <p class="s">${mineP != null ? `Your share ${money(mine)}` : "You're not involved"}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}${unclaimedItems(e).length ? ` · <span class="neg">${unclaimedItems(e).length} item${unclaimedItems(e).length === 1 ? '' : 's'} to pick</span>` : ''}</p></div>
+        <p class="s">${mineP != null ? `Your share ${money(mine)}` : "You're not involved"}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}${unclaimedItems(e).length ? ` · <span class="neg">${unclaimedItems(e).length} item${unclaimedItems(e).length === 1 ? '' : 's'} to pick</span>` : ''}${savedOf(e).saved > 0 ? ` · saved ${esc(savedOf(e).local && e.orig_currency ? curFmt(savedOf(e).saved, e.orig_currency) : money(savedOf(e).saved))}` : ''}</p></div>
       <div class="amt"><b class="num">${money(e.amount_gbp)}</b>${label ? `<span class="${tone}t">${label}</span>` : ''}${e.orig_amount ? `<span class="m">${esc(fmtNum(e.orig_amount, e.orig_currency))}</span>` : ''}${e.cashback_gbp > 0 ? `<span class="m">cashback -${money(e.cashback_gbp)}</span>` : ''}</div>
     </button>`;
 }
@@ -893,8 +893,9 @@ function claimView() {
     const named = ((e.items[i] || {}).names || []).includes(S.me);
     const mine = named || mineIdx.includes(i);
     const others = it.names.filter((n) => n !== S.me);
-    return `<button class="ex claimrow ${mine ? 'on' : ''}" data-act="claimItem" data-i="${i}" ${named ? 'disabled' : ''}><span class="cbox">${mine ? '✓' : ''}</span><div class="mid"><p class="t">${esc(it.description)}</p><p class="s">${others.length ? `Also: ${esc(others.join(', '))}` : (it.names.length ? '' : 'Nobody yet')}${named ? ' · set by the person who added it' : ''}</p></div><b class="num">${curFmt(it.amount, cur)}</b></button>`;
+    return `<button class="ex claimrow ${mine ? 'on' : ''}" data-act="claimItem" data-i="${i}" ${named ? 'disabled' : ''}><span class="cbox">${mine ? '✓' : ''}</span><div class="mid"><p class="t">${esc(it.description)}</p><p class="s">${others.length ? `Also: ${esc(others.join(', '))}` : (it.names.length ? '' : 'Nobody yet')}${named ? ' · set by the person who added it' : ''}</p></div><span class="amtcol"><b class="num">${curFmt(it.amount, cur)}</b>${Number(it.was) > Number(it.amount) ? `<s class="was">${curFmt(it.was, cur)}</s>` : ''}</span></button>`;
   }).join('')}
+    ${savedOf(e).saved > 0 ? `<p class="muted">Discounts saved ${curFmt(savedOf(e).saved, cur)} on this receipt - the prices above are what was actually charged.</p>` : ''}
     <div class="card">Your share so far: <b class="num">${money(my)}</b><div class="muted">Your items plus your part of any service charge or VAT${e.cashback_gbp > 0 ? ', after cashback' : ''}.</div></div>
     ${left.length ? `<div class="alert">${left.length} item${left.length === 1 ? '' : 's'} (${curFmt(leftSum, cur)}) nobody has picked yet - counted against ${esc(e.paid_by)} until someone does.</div>` : '<p class="sub">Everything is picked.</p>'}
     <button class="full" data-act="claimDone">Done</button>`;
@@ -931,7 +932,7 @@ function formFromExpense(e) {
     orig_amount: e.orig_amount ?? '', orig_currency: e.orig_currency || S.trip.currency,
     rate: e.gbp_estimated && e.rate ? e.rate : '',
     paid_by: e.paid_by, split_type: e.split_type, participants,
-    items: e.items && e.items.length ? effectiveItems(e).map((i) => ({ description: i.description, amount: i.amount, names: i.names || [] })) : [{ description: '', amount: '', names: members.slice() }],
+    items: e.items && e.items.length ? effectiveItems(e).map((i) => ({ description: i.description, amount: i.amount, names: i.names || [], was: i.was ?? '' })) : [{ description: '', amount: '', names: members.slice() }],
     claim_open: !!e.claim_open, cashback_on: Number(e.cashback_gbp) > 0, gift_card: e.gift_card_gbp ?? '', cashback_pct: e.cashback_pct ?? '',
     extras: e.extras || [], editItems: false, collapsed: [],
     notes: e.notes || '', paste: '', pasteMsg: '', wasEstimated: !!e.gbp_estimated, original: e,
@@ -978,7 +979,7 @@ function itemSummaryHtml(f) {
     return `<div class="pcard">
       <button type="button" class="phead" data-act="togglePerson" data-name="${esc(p.name)}"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)}</b><span class="num">${curFmt(p.total, cur)}${gbpText} <i class="ti ti-chevron-${open ? 'up' : 'down'}" aria-hidden="true"></i></span></button>
       ${open ? `<div class="plines">
-        ${p.pieces.map((pc) => `<div class="row between"><span class="grow">${esc(pc.description)}${pc.count > 1 ? `<small>${esc(shareNote(pc, members))}</small>` : ''}</span><span class="num">${curFmt(pc.amount, cur)}</span></div>`).join('')}
+        ${p.pieces.map((pc) => `<div class="row between"><span class="grow">${esc(pc.description)}${pc.was ? `<small>original price ${curFmt(pc.was, cur)}${pc.count > 1 ? ' (whole item)' : ''}</small>` : ''}${pc.count > 1 ? `<small>${esc(shareNote(pc, members))}</small>` : ''}</span><span class="num">${curFmt(pc.amount, cur)}</span></div>`).join('')}
         <div class="row between sum"><span>Items</span><span class="num">${curFmt(p.subtotal, cur)}</span></div>
         ${p.extra > 0 ? `<div class="row between"><span>${esc(extraName || 'Service, VAT and other')} (your share)</span><span class="num">+ ${curFmt(p.extra, cur)}</span></div>` : ''}
         <div class="row between sum"><b>Total</b><b class="num">${curFmt(p.total, cur)}${gbpText}</b></div>
@@ -988,6 +989,7 @@ function itemSummaryHtml(f) {
   const check = bd.over || bd.unassigned.length ? '' : `<p class="muted" style="margin:6px 0 0">Bill ${curFmt(bd.total, cur)} = items ${curFmt(bd.itemsSum, cur)}${bd.extras > 0 ? ` + ${bd.extraLabels.map((x) => `${esc(x.label.toLowerCase())} ${curFmt(x.amount, cur)}`).join(' + ')} (about ${bd.extrasPct}% on top, shared in proportion)` : ''}. ${bd.balanced ? 'Everything is shared out.' : ''}</p>`;
   return `<h2 style="margin-top:14px">Who had what</h2>
     ${warnings.length ? `<div class="alert">${warnings.join('<br>')}</div>` : ''}
+    ${bd.saved > 0 ? `<p class="muted" style="margin:6px 0 0">Original prices add up to ${curFmt(bd.itemsSum + bd.saved, cur)}; discounts saved ${curFmt(bd.saved, cur)}.</p>` : ''}
     ${cards}${check}`;
 }
 
@@ -1038,6 +1040,7 @@ function formView() {
       ${f.items.map((it, i) => `<div class="item">
         <div class="row"><input data-item="${i}" data-field="description" value="${esc(it.description)}" placeholder="Item"><input data-item="${i}" data-field="amount" inputmode="decimal" value="${esc(it.amount)}" placeholder="0.00" style="max-width:110px">
         <button type="button" class="danger" data-act="removeItem" data-i="${i}">✕</button></div>
+        <div class="row" style="margin-top:6px"><input data-item="${i}" data-field="was" inputmode="decimal" value="${esc(it.was ?? '')}" placeholder="Original price before discount (optional)"></div>
         <div class="chips" style="margin-top:8px">${members.map((m) => `<button type="button" class="chip ${(it.names || []).includes(m) ? 'on' : ''}" data-act="itemWho" data-i="${i}" data-name="${esc(m)}">${esc(m)}</button>`).join('')}</div></div>`).join('')}
       <button type="button" class="secondary" data-act="addItem">+ Add item</button>
       <div id="itemsHint" class="sub" style="margin-top:8px"></div>
@@ -1114,7 +1117,7 @@ function payloadFromForm() {
   if (f.split_type === 'items') {
     const local = amounts.orig_amount > 0;
     e.items = f.items.filter((i) => i.description.trim() || i.amount !== '').map((i) => ({
-      description: i.description.trim(), amount: Number(i.amount), names: i.names || [], ...(local ? { in_local: true } : {}),
+      description: i.description.trim(), amount: Number(i.amount), names: i.names || [], ...(Number(i.was) > Number(i.amount) ? { was: Number(i.was) } : {}), ...(local ? { in_local: true } : {}),
     }));
     if (e.items.some((i) => !(i.amount >= 0))) throw new Error('Every item needs an amount.');
     e.extras = f.extras && f.extras.length ? f.extras.map((x) => ({ label: x.label, amount: Number(x.amount) })) : null;
@@ -1561,7 +1564,7 @@ function fillFromBlock(f, text) {
   try {
     const r = parseReceiptBlock(text, S.trip.members || []);
     const filled = [];
-    f.items = r.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names }));
+    f.items = r.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names, was: i.was ?? '' }));
     f.extras = r.extras || []; f.editItems = false; f.collapsed = [];
     filled.push(`${r.items.length} items`);
     if (r.extras.length) filled.push(r.extras.map((x) => x.label.toLowerCase()).join(' and '));
@@ -1864,7 +1867,7 @@ document.addEventListener('input', (ev) => {
   if (S.view !== 'form' || !f) return;
   if (t.id === 'f_paste') { f.paste = t.value; return; }
   if (t.id && t.id.startsWith('f_')) f[t.id.slice(2)] = NUMERIC_FIELDS.has(t.id.slice(2)) ? cleanNum(t.value) : t.value;
-  else if (t.dataset.item !== undefined) f.items[Number(t.dataset.item)][t.dataset.field] = t.dataset.field === 'amount' ? cleanNum(t.value) : t.value;
+  else if (t.dataset.item !== undefined) f.items[Number(t.dataset.item)][t.dataset.field] = (t.dataset.field === 'amount' || t.dataset.field === 'was') ? cleanNum(t.value) : t.value;
   else if (t.dataset.val !== undefined) f.participants[t.dataset.val].value = cleanNum(t.value);
   updateHints();
 });
@@ -1878,7 +1881,7 @@ document.addEventListener('change', (ev) => {
   if (t.dataset.map !== undefined) { patchStore((s) => { if (t.value) s.nameMap[t.dataset.map] = t.value; else delete s.nameMap[t.dataset.map]; }); render(); return; }
   if (t.dataset.f && t.dataset.k) { S[t.dataset.f][t.dataset.k] = t.type === 'checkbox' ? t.checked : t.value; return; }
   if (S.view !== 'form' || !f) return;
-  if ((t.id && NUMERIC_FIELDS.has(t.id.slice(2))) || t.dataset.field === 'amount' || t.dataset.val !== undefined) { const c = cleanNum(t.value); if (c !== t.value) t.value = c; }
+  if ((t.id && NUMERIC_FIELDS.has(t.id.slice(2))) || t.dataset.field === 'amount' || t.dataset.field === 'was' || t.dataset.val !== undefined) { const c = cleanNum(t.value); if (c !== t.value) t.value = c; }
   if (t.dataset.who !== undefined) { f.participants[t.dataset.who].on = t.checked; render(); updateHints(); }
   else if (t.id === 'f_paid_by') { f.paid_by = t.value; render(); updateHints(); }
 });

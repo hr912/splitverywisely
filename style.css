@@ -238,3 +238,6 @@ nav.tabs button .dotn { top: 4px; right: calc(50% - 22px); }
 .claimrow[disabled] { opacity: 0.75; }
 
 .owes { margin: 4px 0 2px; font-size: 0.92rem; color: var(--ink); }
+
+.amtcol { display: flex; flex-direction: column; align-items: flex-end; flex: none; }
+.was { color: var(--muted); font-size: 0.8rem; }

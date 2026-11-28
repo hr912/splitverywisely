@@ -263,6 +263,7 @@ export function parseReceiptBlock(text, memberNames) {
     return {
       description: String(it.description || it.name || '').trim(),
       amount: Number(it.amount),
+      was: Number(it.was ?? it.original_price ?? it.orig_price) > Number(it.amount) ? Number(it.was ?? it.original_price ?? it.orig_price) : null,
       names: names.length ? names : (given.length || left ? [] : memberNames.slice()),
       left,
     };
