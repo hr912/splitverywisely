@@ -71,6 +71,12 @@ function owesLines(name, transfers) {
   const all = [...out, ...inn];
   return all.length ? `<div class="owes">${all.map(esc).join(' · ')}</div>` : '';
 }
+// Payments someone has said they made that the other person hasn't confirmed yet.
+const pendingSum = (from, to) => S.settlements.filter((x) => x.status === 'claimed' && x.from === from && x.to === to).reduce((t, x) => t + Number(x.amount_gbp), 0);
+function pendingLines(name) {
+  const lines = S.settlements.filter((x) => x.status === 'claimed' && (x.from === name)).map((x) => `${name === S.me ? 'You' : name} paid ${x.to === S.me ? 'you' : x.to} ${money(x.amount_gbp)} - waiting for ${x.to === S.me ? 'you' : x.to} to confirm`);
+  return lines.length ? `<div class="owes neg">${lines.map(esc).join('<br>')}</div>` : '';
+}
 function balanceToggle() {
   if (S.adjustments.length) return '<p class="muted">Carried-over balances are in this trip, so payments are shown in the simplified way only.</p>';
   const m = balanceMode();
@@ -806,15 +812,25 @@ function tabBalancesTab(all) {
     <p class="sub">Everything on the tab so far. Payments only count once the person who received them has tapped "Got it".</p>
     ${all.people.map((p) => `<div class="card tap" data-act="openPerson" data-name="${esc(p.name)}"><div class="row between"><b>${esc(p.name === S.me ? `${p.name} (you)` : p.name)} ›</b>
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
-      ${owesLines(p.name, transfersFor(all))}
+      ${owesLines(p.name, transfersFor(all))}${pendingLines(p.name)}
       <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}</div></div>`).join('')}
     <h2>Settle up</h2>
     <p class="sub">Paid someone? Tap "I've paid" and they'll be asked to confirm.</p>
     ${transfersFor(all).length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : transfersFor(all).map((t) => {
     const mine = t.from === S.me; const toMe = t.to === S.me;
-    return `<div class="card"><div class="row between"><span><b>${esc(mine ? 'You' : t.from)}</b> pay${mine ? '' : 's'} <b>${esc(toMe ? 'you' : t.to)}</b></span><b class="num">${money(t.amount_gbp)}</b></div>
-      ${mine ? `<div style="height:8px"></div><button class="secondary" data-act="claimPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">I've paid this</button>`
-    : toMe ? `<div style="height:8px"></div><button class="secondary" data-act="receivedPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">${esc(t.from)} has paid me</button>` : ''}</div>`;
+    const pend = pendingSum(t.from, t.to);
+    const rem = Math.round((t.amount_gbp - pend) * 100) / 100;
+    let action = '';
+    if (mine) {
+      if (pend > 0.004) action += `<p class="muted" style="margin:8px 0 0"><b>${money(pend)}</b> sent - waiting for ${esc(t.to)} to confirm</p>`;
+      if (rem > 0.004) action += `<div style="height:8px"></div><button class="secondary" data-act="claimPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${rem.toFixed(2)}">${pend > 0.004 ? `I've also paid the other ${money(rem)}` : "I've paid this"}</button>`;
+    } else if (toMe) {
+      const claim = S.settlements.find((x) => x.status === 'claimed' && x.from === t.from && x.to === S.me);
+      action = claim
+        ? `<p class="muted" style="margin:8px 0 0">${esc(t.from)} says they paid you <b>${money(pend)}</b>.</p><div style="height:8px"></div><button data-act="confirmPay" data-uid="${esc(claim.uid)}">Got it</button>`
+        : `<div style="height:8px"></div><button class="secondary" data-act="receivedPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">${esc(t.from)} has paid me</button>`;
+    }
+    return `<div class="card"><div class="row between"><span><b>${esc(mine ? 'You' : t.from)}</b> pay${mine ? '' : 's'} <b>${esc(toMe ? 'you' : t.to)}</b></span><b class="num">${money(t.amount_gbp)}</b></div>${action}</div>`;
   }).join('')}
     <div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="secondary" data-act="payFor">Record a different amount</button></div>
     <h2>Month-end statement</h2>
@@ -1660,6 +1676,8 @@ document.addEventListener('click', async (ev) => {
       const mine = act === 'claimPaid';
       const amount = Math.round(Number(d.amt) * 100) / 100;
       const uid = newUid(); const now = new Date().toISOString();
+      // show it at once, so a second tap can't send it again
+      S.settlements = [...S.settlements, { uid, from: d.from, to: d.to, amount_gbp: amount, settle_date: todayIso(), status: mine ? 'claimed' : 'confirmed', by: S.me }];
       fireAndForget(setDoc(tripRef('settlements', uid), clean({ from: d.from, to: d.to, amount_gbp: amount, settle_date: todayIso(), notes: null, created_at: now, by: S.me, status: mine ? 'claimed' : 'confirmed', ...(mine ? {} : { confirmed_by: S.me, confirmed_at: now }) })));
       logActivity(mine ? `${S.me} says they paid ${d.to} ${money(amount)} - waiting for ${d.to} to confirm` : `${S.me} confirmed that ${d.from} paid ${money(amount)}`, 'payment');
       S.notice = mine ? `Sent. ${d.to} will be asked to confirm it.` : 'Recorded.'; render(); break;
