@@ -2,7 +2,7 @@
 // can be tested on its own. Mirrors the desktop app's rules (see
 // electron/main.js: resolveTripAmounts, computeTripDetail).
 import {
-  toPence, toPounds, splitAmount, splitItemised, splitItemisedLocal, simplifyDebts,
+  toPence, toPounds, allocate, splitAmount, splitItemised, splitItemisedLocal, simplifyDebts,
 } from './trip-math.js';
 import { CATEGORIES } from './categories.js';
 
@@ -49,22 +49,51 @@ export function resolveAmounts(trip, f) {
   throw new Error('Enter the amount - in pounds, or in the local currency.');
 }
 
+// What the group really pays for an expense once any cashback is taken off (in pence).
+export const effPence = (e) => toPence(e.amount_gbp) - toPence(e.cashback_gbp || 0);
+
+// Items with everyone's picks folded in: friends tick what they had ("claims": { name: [item numbers] }), and that is added
+// to whoever the creator named on the item.
+export function effectiveItems(e) {
+  const claims = e.claims || {};
+  return (e.items || []).map((it, i) => {
+    const names = new Set(it.names || []);
+    Object.entries(claims).forEach(([n, idx]) => { if (Array.isArray(idx) && idx.includes(i)) names.add(n); });
+    return { ...it, names: [...names] };
+  });
+}
+// Items nobody has picked yet, on a receipt left open for friends to pick.
+export const unclaimedItems = (e) => (e.split_type === 'items' && e.claim_open
+  ? effectiveItems(e).map((it, i) => ({ ...it, i })).filter((it) => !it.names.length && Number(it.amount) > 0)
+  : []);
+
 // Pence each person owes for one expense, keyed by name. Throws a plain message if the split doesn't add up.
+// Cashback is shared out in proportion to everyone's share. Items nobody has picked yet count against whoever paid until picked.
 export function expenseSharesPence(e) {
   const amountPence = toPence(e.amount_gbp);
+  let shares;
   if (e.split_type === 'items') {
-    const items = (e.items || []).map((it) => ({
-      description: it.description, amountPence: toPence(it.amount), memberIds: it.names || [],
+    const open = !!e.claim_open;
+    const items = effectiveItems(e).map((it) => ({
+      description: it.description, amountPence: toPence(it.amount), memberIds: it.names.length || !open ? it.names : [e.paid_by],
     }));
     const local = (e.items || []).some((it) => it.in_local) && e.orig_amount > 0;
-    return local
+    shares = local
       ? splitItemisedLocal({ totalGbpPence: amountPence, totalLocalPence: toPence(e.orig_amount), items, payerId: e.paid_by })
       : splitItemised({ totalPence: amountPence, items, payerId: e.paid_by }).shares;
+  } else {
+    shares = splitAmount({
+      amountPence, splitType: e.split_type, payerId: e.paid_by,
+      participants: (e.participants || []).map((p) => ({ memberId: p.name, value: p.value })),
+    });
   }
-  return splitAmount({
-    amountPence, splitType: e.split_type, payerId: e.paid_by,
-    participants: (e.participants || []).map((p) => ({ memberId: p.name, value: p.value })),
-  });
+  const cb = toPence(e.cashback_gbp || 0);
+  if (cb > 0 && cb < amountPence) {
+    const names = Object.keys(shares);
+    const parts = allocate(amountPence - cb, names.map((n) => ({ id: n, weight: shares[n] })), e.paid_by);
+    return Object.fromEntries(names.map((n) => [n, parts[n]]));
+  }
+  return shares;
 }
 
 export function computeAll(trip, expenses, settlements, adjustments = []) {
@@ -79,7 +108,7 @@ export function computeAll(trip, expenses, settlements, adjustments = []) {
   const shareByExpense = {}; const problems = {};
   let total = 0; let estimatedCount = 0; let estimatedPence = 0;
   expenses.forEach((e) => {
-    const amt = toPence(e.amount_gbp);
+    const amt = effPence(e);
     total += amt;
     if (e.gbp_estimated) { estimatedCount += 1; estimatedPence += amt; }
     paid[e.paid_by] = (paid[e.paid_by] || 0) + amt;
@@ -114,10 +143,37 @@ export function computeAll(trip, expenses, settlements, adjustments = []) {
   };
 }
 
+// "Directly between people": for every pair, only what is between those two (what each owes the other from the expenses
+// one paid for the other, less payments made between them) - no re-routing through a third person.
+export function pairwiseTransfers(trip, expenses, settlements) {
+  const all = computeAll(trip, expenses, settlements, []);
+  const owe = {};
+  const add = (a, b, p) => { owe[a] = owe[a] || {}; owe[a][b] = (owe[a][b] || 0) + p; };
+  const names = new Set(all.people.map((p) => p.name));
+  expenses.forEach((e) => {
+    const s = all.shareByExpense[e.uid];
+    if (!s) return;
+    Object.entries(s).forEach(([n, p]) => { if (n !== e.paid_by && p > 0) add(n, e.paid_by, p); });
+  });
+  settlements.filter((x) => !x.status || x.status === 'confirmed').forEach((x) => add(x.from, x.to, -toPence(x.amount_gbp)));
+  const list = [...names].sort();
+  const out = [];
+  for (let i = 0; i < list.length; i += 1) {
+    for (let j = i + 1; j < list.length; j += 1) {
+      const a = list[i]; const b = list[j];
+      const net = ((owe[a] || {})[b] || 0) - ((owe[b] || {})[a] || 0);
+      if (net >= 1) out.push({ from: a, to: b, amount_gbp: toPounds(net) });
+      else if (net <= -1) out.push({ from: b, to: a, amount_gbp: toPounds(-net) });
+    }
+  }
+  return out.sort((x, y) => y.amount_gbp - x.amount_gbp);
+}
+
 // The same file the desktop app saves/imports ("Save trip file" / "Import trip file").
 export function buildTripFile(trip, expenses, settlements, deletedUids) {
   const strip = (e) => {
-    const { _pending, ...rest } = e;
+    const { _pending, claims, ...rest } = e;
+    if (rest.items) rest.items = effectiveItems(e).map((it) => ({ ...it }));
     return rest;
   };
   return clean({
@@ -203,10 +259,12 @@ export function parseReceiptBlock(text, memberNames) {
   const items = data.items.map((it) => {
     const given = Array.isArray(it.names) ? it.names : (it.who ? [it.who] : []);
     const names = [...new Set(given.map(resolve).filter(Boolean))];
+    const left = it.unclaimed === true || it.names === null; // "nobody yet" - friends pick it themselves (an empty list still means everyone)
     return {
       description: String(it.description || it.name || '').trim(),
       amount: Number(it.amount),
-      names: names.length ? names : (given.length ? [] : memberNames.slice()),
+      names: names.length ? names : (given.length || left ? [] : memberNames.slice()),
+      left,
     };
   });
   const cat = CATEGORIES.find((c) => c.name.toLowerCase() === String(data.category || '').trim().toLowerCase());
@@ -226,6 +284,9 @@ export function parseReceiptBlock(text, memberNames) {
     subtype: sub ? sub[0] : null,
     paid_by: payer,
     paid_gbp: gbp > 0 ? gbp : null,
+    claim: data.claim === true || items.some((i) => i.left),
+    gift_card: Number(data.gift_card_gbp ?? data.gift_card) > 0 ? Number(data.gift_card_gbp ?? data.gift_card) : null,
+    cashback_pct: Number(data.cashback_pct) > 0 ? Number(data.cashback_pct) : null,
     notes: data.notes ? String(data.notes).trim() : null,
   };
 }

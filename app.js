@@ -5,7 +5,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
 import {
-  SPLIT_LABELS, clean, newCode, newUid, resolveAmounts, computeAll, buildTripFile, parseReceiptBlock, expenseSharesPence,
+  SPLIT_LABELS, clean, newCode, newUid, resolveAmounts, computeAll, buildTripFile, parseReceiptBlock, expenseSharesPence, pairwiseTransfers, effectiveItems, unclaimedItems,
 } from './logic.js';
 import {
   itemisedBreakdown, summarize, budgetState, describeChange, activityLine, canonicalName, combineTrips, unmatchedNames, settleMessage, findDuplicate, sha256Hex, buildCarryOver,
@@ -54,13 +54,22 @@ const S = {
   flt: { q: '', who: '', cat: '', mine: false, open: false },
   error: '', notice: '',
   newMode: 'file',
-  month: null, stmtMonth: null, homeBadges: {},
+  month: null, stmtMonth: null, homeBadges: {}, claimUid: null, claimTouched: false, draft: null,
 };
 // A running tab is a trip document with kind: 'tab' - same engine, but no dates, pounds only, month views and statements.
 const isTab = () => S.trip?.kind === 'tab';
 const noun = () => (isTab() ? 'tab' : 'trip');
 const thisMonth = () => todayIso().slice(0, 7);
 const curMonth = () => S.month || thisMonth();
+// Balances can be shown as the fewest payments overall ("simple") or only what is between each pair of people ("direct").
+const balanceMode = () => (readStore().prefs.balanceMode === 'direct' && !S.adjustments.length ? 'direct' : 'simple');
+const transfersFor = (all) => (balanceMode() === 'direct' ? pairwiseTransfers(S.trip, S.expenses, S.settlements) : all.transfers);
+function balanceToggle() {
+  if (S.adjustments.length) return '<p class="muted">Carried-over balances are in this trip, so payments are shown in the simplified way only.</p>';
+  const m = balanceMode();
+  return `<div class="seg" style="margin:8px 0"><button class="${m === 'simple' ? 'on' : ''}" data-act="balanceMode" data-mode="simple">Fewest payments</button><button class="${m === 'direct' ? 'on' : ''}" data-act="balanceMode" data-mode="direct">Directly between people</button></div>
+    <p class="muted" style="margin-top:0">${m === 'simple' ? 'Fewest payments clears everyone, but may route money through a third person.' : 'Each pair only settles what is between the two of them - nobody is paid on behalf of someone else.'}</p>`;
+}
 let unsubs = [];
 let idsWriting = false;
 
@@ -121,6 +130,7 @@ function openTrip(code) {
       refreshTheme();
       computeOwner();
       ensureMemberIds();
+      if (S.draft && S.me) { applyDraft(); return; }
     }
     softRender();
   }, () => { S.loaded = true; softRender(); }));
@@ -155,9 +165,19 @@ function openTrip(code) {
   render();
 }
 
+// A tap-to-add link looks like  #t=CODE&r=<receipt block>  - the block is read straight into the "add expense" form.
+function safeDecode(raw) {
+  const plus = raw.replace(/\+/g, ' ');
+  try { return decodeURIComponent(plus); } catch { /* a stray % - tidy it and try again */ }
+  try { return decodeURIComponent(plus.replace(/%(?![0-9a-f]{2})/gi, '%25')); } catch { return plus; }
+}
 function routeFromHash() {
-  const m = /[#&]t=([a-z0-9]+)/i.exec(location.hash);
+  const h = location.hash.replace(/^#/, '');
+  const m = /(?:^|&)t=([a-z0-9]+)/i.exec(h);
+  const ri = h.search(/(?:^|&)r=/);
   if (m) {
+    S.draft = ri >= 0 ? safeDecode(h.slice(h.indexOf('r=', ri) + 2)) : null;
+    if (S.draft) { try { history.replaceState(null, '', `#t=${m[1].toLowerCase()}`); } catch { /* ignore */ } }
     openTrip(m[1].toLowerCase());
   } else if (!['new', 'newtab', 'combo'].includes(S.view)) {
     leaveTrip();
@@ -181,7 +201,7 @@ function logActivity(text, kind, code = S.code, by = S.me, extra = {}) {
 // ---------------------------------------------------------------- rendering
 function softRender() { if (!FORM_VIEWS.includes(S.view) && !(S.view === 'info' && S.noteForm)) render(); }
 function render() {
-  const views = { home: homeView, new: newView, newtab: newTabView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView, carry: carryView, adj: adjView, info: infoView, person: personView, recap: recapView };
+  const views = { home: homeView, new: newView, newtab: newTabView, who: whoView, form: formView, pay: payView, edit: editView, activity: activityView, combo: comboView, carry: carryView, adj: adjView, info: infoView, person: personView, recap: recapView, claim: claimView };
   $app.innerHTML = (views[S.view] || tripView)();
 }
 
@@ -411,7 +431,7 @@ function rowHtml(r, all) {
   const iPaid = e.paid_by === S.me;
   let tone = 'n'; let label = '';
   if (iPaid) {
-    const lent = e.amount_gbp - mine;
+    const lent = (e.amount_gbp - (e.cashback_gbp || 0)) - mine;
     if (lent > 0.004) { tone = 'g'; label = `you lent ${money(lent)}`; }
   } else if (mine > 0.004) { tone = 'r'; label = `you borrowed ${money(mine)}`; }
   const what = e.subtype || e.category || '';
@@ -419,8 +439,8 @@ function rowHtml(r, all) {
       <div class="tile t${tone}"><i class="ti ti-${iconFor(e.category, e.subtype)}" aria-hidden="true"></i></div>
       <div class="mid"><p class="t">${esc(e.description)}</p>
         <p class="s">${esc(fmtShort(e.expense_date))}${e.expense_date ? ' · ' : ''}${esc(iPaid ? 'You paid' : `${e.paid_by} paid`)}${what ? ` · ${esc(what)}` : ''}${e.gbp_estimated ? '<span class="est">est. £</span>' : ''}</p>
-        <p class="s">${mineP != null ? `Your share ${money(mine)}` : "You're not involved"}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}</p></div>
-      <div class="amt"><b class="num">${money(e.amount_gbp)}</b>${label ? `<span class="${tone}t">${label}</span>` : ''}${e.orig_amount ? `<span class="m">${esc(fmtNum(e.orig_amount, e.orig_currency))}</span>` : ''}</div>
+        <p class="s">${mineP != null ? `Your share ${money(mine)}` : "You're not involved"}${all.problems[e.uid] ? ' · <span class="neg">check the split</span>' : ''}${unclaimedItems(e).length ? ` · <span class="neg">${unclaimedItems(e).length} item${unclaimedItems(e).length === 1 ? '' : 's'} to pick</span>` : ''}</p></div>
+      <div class="amt"><b class="num">${money(e.amount_gbp)}</b>${label ? `<span class="${tone}t">${label}</span>` : ''}${e.orig_amount ? `<span class="m">${esc(fmtNum(e.orig_amount, e.orig_currency))}</span>` : ''}${e.cashback_gbp > 0 ? `<span class="m">cashback -${money(e.cashback_gbp)}</span>` : ''}</div>
     </button>`;
 }
 
@@ -464,8 +484,11 @@ function expensesTab(all) {
   const f = S.flt;
   const cats = [...new Set([...CATEGORIES.map((c) => c.name), ...S.expenses.map((e) => e.category).filter(Boolean)])];
   const people = [...new Set([...(S.trip.members || []), ...S.expenses.map((e) => e.paid_by)])];
+  const openRec = S.expenses.filter((e) => unclaimedItems(e).length);
+  const claimBanner = openRec.length ? `<div class="alert"><b>Items waiting to be picked</b> - tap one, then tick what you had.<div class="chips" style="margin-top:6px">${openRec.map((e) => `<button type="button" class="chip" data-act="openClaim" data-uid="${esc(e.uid)}">${esc(e.description)} · ${unclaimedItems(e).length} left</button>`).join('')}</div></div>` : '';
   return `
     ${isTab() ? monthBar() + monthLine() : ''}
+    ${claimBanner}
     ${estimateAlert(all)}
     ${today ? `<p class="today">Today so far <b>${money(today.total)}</b> · your share <b>${money(today.mine)}</b></p>` : ''}
     <div class="row"><input data-flt="q" placeholder="Search expenses" value="${esc(f.q)}" autocomplete="off"><button class="secondary" data-act="toggleFilters">Filters${(f.who || f.cat || f.mine) ? ' ●' : ''}</button></div>
@@ -693,8 +716,9 @@ function balancesTab(all) {
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
       <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}${Math.abs(p.carried) > 0.004 ? ` · Carried over ${p.carried > 0 ? '+' : '-'}${money(Math.abs(p.carried))}` : ''}</div></div>`).join('')}
     <h2>Settle up</h2>
-    <p class="sub">The fewest payments that clear everything, always in pounds. Someone paid a different amount? Use "Record a payment".</p>
-    ${all.transfers.length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : all.transfers.map((t) => `
+    ${balanceToggle()}
+    <p class="sub">Always in pounds. Someone paid a different amount? Use "Record a payment".</p>
+    ${transfersFor(all).length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : transfersFor(all).map((t) => `
       <div class="card"><div class="row between"><span><b>${esc(t.from === S.me ? 'You' : t.from)}</b> pay${t.from === S.me ? '' : 's'} <b>${esc(t.to === S.me ? 'you' : t.to)}</b></span><b class="num">${money(t.amount_gbp)}</b></div>
       <div style="height:8px"></div><button class="secondary" data-act="payFor" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">Record this payment</button></div>`).join('')}
     <div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="secondary" data-act="payFor">Record a payment</button>
@@ -760,7 +784,7 @@ function statementMonth() { return S.stmtMonth || prevMonth(thisMonth()); }
 function tabBalancesTab(all) {
   const pend = pendingPayments(S.settlements, S.me);
   const sm = statementMonth();
-  const st = tabStatement(S.trip, S.expenses, S.settlements, sm);
+  const st = tabStatement(S.trip, S.expenses, S.settlements, sm, balanceMode());
   const months = monthsWithData(S.expenses, S.settlements, thisMonth());
   const stmtMonths = [...new Set([prevMonth(thisMonth()), ...months])].sort().reverse().slice(0, 12);
   const payRow = (s, buttons) => `<div class="card"><div class="row between"><span>${esc(s.from === S.me ? 'You' : s.from)} said ${s.from === S.me ? 'you' : 'they'} paid ${esc(s.to === S.me ? 'you' : s.to)}</span><b class="num">${money(s.amount_gbp)}</b></div>
@@ -774,8 +798,9 @@ function tabBalancesTab(all) {
       <span class="${p.net > 0.004 ? 'pos' : p.net < -0.004 ? 'neg' : 'muted'} num">${Math.abs(p.net) < 0.005 ? 'All square' : p.net > 0 ? `Is owed ${money(p.net)}` : `Owes ${money(-p.net)}`}</span></div>
       <div class="muted num">Paid ${money(p.paid)} · Their share ${money(p.share)}${p.settled ? ` · Payments ${money(p.settled)}` : ''}</div></div>`).join('')}
     <h2>Settle up</h2>
-    <p class="sub">The fewest payments that clear everything. Paid someone? Tap "I've paid" and they'll be asked to confirm.</p>
-    ${all.transfers.length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : all.transfers.map((t) => {
+    ${balanceToggle()}
+    <p class="sub">Paid someone? Tap "I've paid" and they'll be asked to confirm.</p>
+    ${transfersFor(all).length === 0 ? `<p class="sub">${S.expenses.length ? 'Everyone is all square.' : 'Nothing to settle yet.'}</p>` : transfersFor(all).map((t) => {
     const mine = t.from === S.me; const toMe = t.to === S.me;
     return `<div class="card"><div class="row between"><span><b>${esc(mine ? 'You' : t.from)}</b> pay${mine ? '' : 's'} <b>${esc(toMe ? 'you' : t.to)}</b></span><b class="num">${money(t.amount_gbp)}</b></div>
       ${mine ? `<div style="height:8px"></div><button class="secondary" data-act="claimPaid" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount_gbp.toFixed(2)}">I've paid this</button>`
@@ -839,6 +864,32 @@ function activityView() {
       <div class="card" style="padding:10px 12px"><div>${esc(a.text)}</div><div class="muted">${esc(fmtWhen(a.at))}</div>${a.kind === 'deleted' && a.ref && S.deletedMap[a.ref]?.expense ? `<button class="secondary" style="margin-top:8px" data-act="restore" data-uid="${esc(a.ref)}">Restore this expense</button>` : ''}</div>`).join('')}`;
 }
 
+// ---------------------------------------------------------------- pick your own items
+function claimView() {
+  const e = S.expenses.find((x) => x.uid === S.claimUid);
+  const back = '<div class="topbar"><button class="ghost" data-act="claimDone">← Back</button></div>';
+  if (!e || !e.items) return `${back}<p class="sub">That receipt isn't here any more.</p>`;
+  const items = effectiveItems(e);
+  const mineIdx = (e.claims || {})[S.me] || [];
+  const all = computeAll(S.trip, S.expenses, S.settlements, S.adjustments);
+  const my = ((all.shareByExpense[e.uid] || {})[S.me] || 0) / 100;
+  const left = unclaimedItems(e);
+  const cur = items.some((i) => i.in_local) && e.orig_currency ? e.orig_currency : 'GBP';
+  const leftSum = left.reduce((t, it) => t + Number(it.amount), 0);
+  return `${back}
+    <h1>${esc(e.description)}</h1>
+    <p class="sub">${esc(fmtShort(e.expense_date))}${e.expense_date ? ' · ' : ''}${esc(e.paid_by)} paid ${money(e.amount_gbp)}${e.cashback_gbp > 0 ? ` (cashback ${money(e.cashback_gbp)} shared out)` : ''}. Tap everything you had.</p>
+    ${items.map((it, i) => {
+    const named = ((e.items[i] || {}).names || []).includes(S.me);
+    const mine = named || mineIdx.includes(i);
+    const others = it.names.filter((n) => n !== S.me);
+    return `<button class="ex claimrow ${mine ? 'on' : ''}" data-act="claimItem" data-i="${i}" ${named ? 'disabled' : ''}><span class="cbox">${mine ? '✓' : ''}</span><div class="mid"><p class="t">${esc(it.description)}</p><p class="s">${others.length ? `Also: ${esc(others.join(', '))}` : (it.names.length ? '' : 'Nobody yet')}${named ? ' · set by the person who added it' : ''}</p></div><b class="num">${curFmt(it.amount, cur)}</b></button>`;
+  }).join('')}
+    <div class="card">Your share so far: <b class="num">${money(my)}</b><div class="muted">Your items plus your part of any service charge or VAT${e.cashback_gbp > 0 ? ', after cashback' : ''}.</div></div>
+    ${left.length ? `<div class="alert">${left.length} item${left.length === 1 ? '' : 's'} (${curFmt(leftSum, cur)}) nobody has picked yet - counted against ${esc(e.paid_by)} until someone does.</div>` : '<p class="sub">Everything is picked.</p>'}
+    <button class="full" data-act="claimDone">Done</button>`;
+}
+
 // ---------------------------------------------------------------- expense form
 function savedDefaults() {
   const d = readStore().defaults[S.code];
@@ -856,7 +907,7 @@ function blankForm() {
     orig_currency: t.currency, rate: '', paid_by: S.me, split_type: d && d.split_type && d.split_type !== 'items' ? d.split_type : 'equal',
     participants: Object.fromEntries(members.map((m) => [m, { on: on.has(m), value: '' }])),
     items: [{ description: '', amount: '', names: members.slice() }], extras: [], editItems: false, collapsed: [],
-    notes: '', paste: '', pasteMsg: '',
+    notes: '', paste: '', pasteMsg: '', claim_open: false, cashback_on: false, gift_card: '', cashback_pct: '',
   };
 }
 function formFromExpense(e) {
@@ -870,7 +921,8 @@ function formFromExpense(e) {
     orig_amount: e.orig_amount ?? '', orig_currency: e.orig_currency || S.trip.currency,
     rate: e.gbp_estimated && e.rate ? e.rate : '',
     paid_by: e.paid_by, split_type: e.split_type, participants,
-    items: e.items && e.items.length ? e.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names || [] })) : [{ description: '', amount: '', names: members.slice() }],
+    items: e.items && e.items.length ? effectiveItems(e).map((i) => ({ description: i.description, amount: i.amount, names: i.names || [] })) : [{ description: '', amount: '', names: members.slice() }],
+    claim_open: !!e.claim_open, cashback_on: Number(e.cashback_gbp) > 0, gift_card: e.gift_card_gbp ?? '', cashback_pct: e.cashback_pct ?? '',
     extras: e.extras || [], editItems: false, collapsed: [],
     notes: e.notes || '', paste: '', pasteMsg: '', wasEstimated: !!e.gbp_estimated, original: e,
   };
@@ -906,7 +958,8 @@ function itemSummaryHtml(f) {
   const poundsConfirmed = f.amount_gbp !== '';
   const extraName = bd.extraLabels.length ? bd.extraLabels.map((x) => x.label).join(' + ') : '';
   const warnings = [];
-  if (bd.unassigned.length) warnings.push(`<b>${bd.unassigned.length} item${bd.unassigned.length === 1 ? ' has' : 's have'} nobody</b> (${esc(bd.unassigned.map((i) => i.description || 'Item').join(', '))}) - tap an item's names below to fix.`);
+  if (bd.unassigned.length) warnings.push(f.claim_open ? `<b>${bd.unassigned.length} item${bd.unassigned.length === 1 ? ' is' : 's are'} left for friends to pick</b> (${esc(bd.unassigned.map((i) => i.description || 'Item').join(', '))}).` : `<b>${bd.unassigned.length} item${bd.unassigned.length === 1 ? ' has' : 's have'} nobody</b> (${esc(bd.unassigned.map((i) => i.description || 'Item').join(', '))}) - tap an item's names below to fix.`);
+  const cbFactor = (() => { if (!f.cashback_on) return 0; const bill = Number(f.amount_gbp) || 0; const pct = Number(f.cashback_pct) || 0; if (!(bill > 0 && pct > 0)) return 0; const card = Number(f.gift_card) > 0 ? Number(f.gift_card) : bill; return (Math.round(card * pct) / 100) / bill; })();
   if (bd.over) warnings.push(`The items add up to <b>${curFmt(bd.itemsSum, cur)}</b>, which is more than the bill of <b>${curFmt(bd.total, cur)}</b>.`);
   const cards = bd.people.map((p) => {
     const open = !(f.collapsed || []).includes(p.name);
@@ -919,6 +972,7 @@ function itemSummaryHtml(f) {
         <div class="row between sum"><span>Items</span><span class="num">${curFmt(p.subtotal, cur)}</span></div>
         ${p.extra > 0 ? `<div class="row between"><span>${esc(extraName || 'Service, VAT and other')} (your share)</span><span class="num">+ ${curFmt(p.extra, cur)}</span></div>` : ''}
         <div class="row between sum"><b>Total</b><b class="num">${curFmt(p.total, cur)}${gbpText}</b></div>
+        ${cbFactor && cur === 'GBP' ? `<div class="row between"><span>Cashback (your share)</span><span class="num">- ${curFmt(p.total * cbFactor, cur)}</span></div><div class="row between sum"><b>To pay after cashback</b><b class="num">${curFmt(p.total * (1 - cbFactor), cur)}</b></div>` : ''}
       </div>` : ''}</div>`;
   }).join('');
   const check = bd.over || bd.unassigned.length ? '' : `<p class="muted" style="margin:6px 0 0">Bill ${curFmt(bd.total, cur)} = items ${curFmt(bd.itemsSum, cur)}${bd.extras > 0 ? ` + ${bd.extraLabels.map((x) => `${esc(x.label.toLowerCase())} ${curFmt(x.amount, cur)}`).join(' + ')} (about ${bd.extrasPct}% on top, shared in proportion)` : ''}. ${bd.balanced ? 'Everything is shared out.' : ''}</p>`;
@@ -934,7 +988,7 @@ function formView() {
   const itemCur = Number(f.orig_amount) > 0 ? f.orig_currency : 'GBP';
   const bd = items ? formBreakdown(f) : null;
   const hasItems = f.items.some((i) => i.description.trim() || i.amount !== '');
-  const editorOpen = items && (f.editItems || !hasItems || !!(bd && (bd.unassigned?.length || bd.over)));
+  const editorOpen = items && (f.editItems || !hasItems || !!(bd && ((bd.unassigned?.length && !f.claim_open) || bd.over)));
   return `
     <div class="topbar"><button class="ghost" data-act="cancelForm">← Cancel</button></div>
     <h1>${f.uid ? 'Edit expense' : 'Add expense'}</h1>
@@ -952,6 +1006,11 @@ function formView() {
     <label>Amount in ${esc(f.orig_currency)} (optional)</label>
     <input id="f_orig_amount" inputmode="decimal" value="${esc(f.orig_amount)}" placeholder="0.00">
     <div id="estHint"></div>`}
+    <div class="card" style="margin-top:12px"><button type="button" class="chip ${f.cashback_on ? 'on' : ''}" data-act="toggleCashback"><i class="ti ti-gift" aria-hidden="true"></i> Paid with a gift card that gives cashback</button>
+      ${f.cashback_on ? `<div class="row"><div class="grow"><label>Gift card amount (£)</label><input id="f_gift_card" inputmode="decimal" value="${esc(f.gift_card)}" placeholder="same as the bill"></div>
+        <div class="grow"><label>Cashback %</label><input id="f_cashback_pct" inputmode="decimal" value="${esc(f.cashback_pct)}" placeholder="e.g. 5"></div></div>
+        <p class="muted" style="margin:6px 0 0">Cashback only counts on the gift card part. Everyone's share goes down by the same proportion.</p>` : ''}
+      <div id="cbHint" class="sub" style="margin:6px 0 0"></div></div>
     <label>Who paid?</label>
     <select id="f_paid_by">${members.map((m) => `<option ${m === f.paid_by ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>
     <label>How is it split?</label>
@@ -961,6 +1020,9 @@ function formView() {
       <textarea id="f_paste" placeholder="Paste what Claude gave you">${esc(f.paste)}</textarea>
       <div style="height:8px"></div><button type="button" class="secondary" data-act="usePaste">Fill in the items</button>
       ${f.pasteMsg ? `<p class="sub">${esc(f.pasteMsg)}</p>` : ''}</div>
+      <button type="button" class="chip ${f.claim_open ? 'on' : ''}" data-act="toggleClaim" style="margin:10px 0 2px"><i class="ti ti-users" aria-hidden="true"></i> Let friends pick their own items</button>
+      <p class="muted" style="margin:4px 0 0">${f.claim_open ? 'On: items nobody is named on wait for friends to tick them in the app (counted against whoever paid until then).' : 'Off: every item needs someone on it.'}</p>
+      ${f.uid ? '<button type="button" class="secondary" style="margin-top:8px" data-act="claimFromForm">Pick what I had</button>' : ''}
       <div id="itemsum">${itemSummaryHtml(f)}</div>
       ${editorOpen ? `<p class="sub" style="margin-top:10px">Add each item and tap who had it. Service charge, VAT or tip that the items don't cover is shared in proportion to what each person had. Skipped the service? Make the bill match the items. Item amounts are in <b>${esc(itemCur === 'GBP' ? '£' : itemCur)}</b>.</p>
       ${f.items.map((it, i) => `<div class="item">
@@ -969,7 +1031,7 @@ function formView() {
         <div class="chips" style="margin-top:8px">${members.map((m) => `<button type="button" class="chip ${(it.names || []).includes(m) ? 'on' : ''}" data-act="itemWho" data-i="${i}" data-name="${esc(m)}">${esc(m)}</button>`).join('')}</div></div>`).join('')}
       <button type="button" class="secondary" data-act="addItem">+ Add item</button>
       <div id="itemsHint" class="sub" style="margin-top:8px"></div>
-      ${f.editItems && hasItems && !(bd && (bd.unassigned?.length || bd.over)) ? '<button type="button" class="secondary full" data-act="toggleEditor">Done editing</button>' : ''}`
+      ${f.editItems && hasItems && !(bd && ((bd.unassigned?.length && !f.claim_open) || bd.over)) ? '<button type="button" class="secondary full" data-act="toggleEditor">Done editing</button>' : ''}`
       : `<button type="button" class="secondary full" data-act="toggleEditor">Edit individual items (${f.items.filter((i) => i.description.trim() || i.amount !== '').length})</button>`}`
     : `
       <div class="row between" style="margin-top:10px"><p class="muted" style="margin:0">Who is it split between?</p>
@@ -995,13 +1057,21 @@ function updateHints() {
   const rate = Number(f.rate) > 0 ? Number(f.rate) : Number(t.default_rate);
   const est = document.getElementById('estHint');
   if (est) est.innerHTML = gbp == null && orig && rate ? `<div class="alert">About ${money(orig * rate)} (estimate). It will be marked "estimated" until the person who paid gives you the real pounds.</div>` : '';
+  const cbBox = document.getElementById('cbHint');
+  if (cbBox) {
+    const bill = gbp || 0; const pct = Number(f.cashback_pct) || 0;
+    const card = Number(f.gift_card) > 0 ? Number(f.gift_card) : bill;
+    const c = Math.round(card * pct) / 100;
+    cbBox.textContent = f.cashback_on ? (bill > 0 && pct > 0 ? `Bill £${bill.toFixed(2)} · cashback £${c.toFixed(2)} (${pct}% of £${card.toFixed(2)}) · shared between everyone £${(bill - c).toFixed(2)}` : 'Enter the bill in pounds and the cashback % to see the shared amount.') : '';
+  }
   const ih = document.getElementById('itemsHint');
   if (ih) {
     const sum = f.items.reduce((s, it) => s + (Number(it.amount) || 0), 0);
     const total = Number(orig) > 0 ? orig : (gbp || 0);
     const cur = Number(orig) > 0 ? f.orig_currency : '£';
     const extra = Math.max(0, total - sum);
-    ih.textContent = `Items ${sum.toFixed(2)} · Bill ${total.toFixed(2)} ${cur === '£' ? '' : cur} · Extras shared in proportion ${extra.toFixed(2)}${sum > total + 0.005 ? ' - items add up to more than the bill!' : ''}`;
+    const unreadable = f.items.filter((it) => it.amount !== '' && !Number.isFinite(Number(it.amount))).length;
+    ih.textContent = `${unreadable ? `${unreadable} amount${unreadable === 1 ? '' : 's'} can't be read - use digits only, like 6.50. ` : ''}Items ${sum.toFixed(2)} · Bill ${total.toFixed(2)} ${cur === '£' ? '' : cur} · Extras shared in proportion ${extra.toFixed(2)}${sum > total + 0.005 ? ' - items add up to more than the bill!' : ''}`;
   }
 }
 
@@ -1022,6 +1092,15 @@ function payloadFromForm() {
     updated_at: new Date().toISOString(),
     updated_by: S.me,
   };
+  if (f.cashback_on && Number(f.cashback_pct) > 0) {
+    const card = Number(f.gift_card) > 0 ? Number(f.gift_card) : amounts.amount_gbp;
+    if (card > amounts.amount_gbp + 0.005) throw new Error("The gift card amount can't be more than the bill.");
+    e.gift_card_gbp = Math.round(card * 100) / 100;
+    e.cashback_pct = Number(f.cashback_pct);
+    e.cashback_gbp = Math.round(card * Number(f.cashback_pct)) / 100;
+  } else { e.gift_card_gbp = null; e.cashback_pct = null; e.cashback_gbp = null; }
+  e.claims = null; // everyone's picks are folded into the items when you save
+  e.claim_open = f.split_type === 'items' && !!f.claim_open;
   if (f.split_type === 'items') {
     const local = amounts.orig_amount > 0;
     e.items = f.items.filter((i) => i.description.trim() || i.amount !== '').map((i) => ({
@@ -1236,6 +1315,7 @@ function chooseMeAndOpen(code, me, token) {
 function setMe(name) {
   patchStore((s) => { s.trips[S.code] = { ...(s.trips[S.code] || {}), me: name }; });
   S.me = name; S.view = 'trip'; S.tab = 'expenses'; S.error = '';
+  if (S.draft && S.trip) { applyDraft(); return; }
   render();
 }
 
@@ -1253,13 +1333,14 @@ async function renamePerson(oldName, newName) {
   if (ids[oldName]) { ids[newName] = ids[oldName]; delete ids[oldName]; }
   batch.update(tripRef(), { member_ids: ids });
   S.expenses.forEach((e) => {
-    const touches = e.paid_by === oldName || (e.participants || []).some((p) => p.name === oldName) || (e.items || []).some((i) => (i.names || []).includes(oldName));
+    const touches = e.paid_by === oldName || (e.participants || []).some((p) => p.name === oldName) || (e.items || []).some((i) => (i.names || []).includes(oldName)) || Object.prototype.hasOwnProperty.call(e.claims || {}, oldName);
     if (!touches) return;
     const { uid, ...rest } = e;
     batch.set(tripRef('expenses', uid), clean({
       ...rest, paid_by: sw(e.paid_by), updated_at: now,
       participants: (e.participants || []).map((p) => ({ ...p, name: sw(p.name) })),
       items: e.items ? e.items.map((i) => ({ ...i, names: (i.names || []).map(sw) })) : null,
+      claims: e.claims ? Object.fromEntries(Object.entries(e.claims).map(([n, v]) => [sw(n), v])) : null,
     }));
   });
   S.settlements.forEach((s) => {
@@ -1464,6 +1545,46 @@ async function loadCombo() {
   render();
 }
 
+// Fills the add-expense form from a receipt block (pasted, or carried by a tap-to-add link).
+function fillFromBlock(f, text) {
+  f.split_type = 'items';
+  try {
+    const r = parseReceiptBlock(text, S.trip.members || []);
+    const filled = [];
+    f.items = r.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names }));
+    f.extras = r.extras || []; f.editItems = false; f.collapsed = [];
+    filled.push(`${r.items.length} items`);
+    if (r.extras.length) filled.push(r.extras.map((x) => x.label.toLowerCase()).join(' and '));
+    const isLocal = r.currency && r.currency !== 'GBP';
+    if (r.total != null) {
+      if (isLocal) {
+        if (f.orig_amount === '') { f.orig_amount = r.total; f.orig_currency = r.currency; filled.push(`the ${r.currency} amount`); }
+      } else if (f.amount_gbp === '') { f.amount_gbp = r.paid_gbp ?? r.total; filled.push('the pounds'); }
+    }
+    if (isLocal && r.paid_gbp && f.amount_gbp === '') { f.amount_gbp = r.paid_gbp; filled.push('the pounds paid'); }
+    if (r.place && !f.description.trim()) { f.description = r.place; filled.push('the place'); }
+    if (r.date) { f.expense_date = r.date; filled.push('the date'); }
+    if (r.category && !f.category) { f.category = r.category; f.subtype = r.subtype || ''; filled.push('the category'); }
+    if (r.paid_by) { f.paid_by = r.paid_by; filled.push('who paid'); }
+    if (r.notes && !f.notes.trim()) { f.notes = r.notes; filled.push('notes'); }
+    if (r.claim) { f.claim_open = true; filled.push('items left for friends to pick'); }
+    if (r.gift_card && r.cashback_pct) { f.cashback_on = true; f.gift_card = r.gift_card; f.cashback_pct = r.cashback_pct; filled.push('the cashback'); }
+    const issues = [];
+    if (r.fuzzy.length) issues.push(`I read ${r.fuzzy.map((x) => `"${x.given}" as ${x.matched}`).join(', ')} - check that's right.`);
+    if (r.ambiguous.length) issues.push(`${r.ambiguous.map((x) => `"${x.given}" could be ${x.options.join(' or ')}`).join('; ')} - tap the right person on those items.`);
+    if (r.unknown.length) issues.push(`I didn't recognise: ${r.unknown.join(', ')} - tap their items below to fix.`);
+    if (!r.paid_by && !f.uid) issues.push('Check who paid - the block didn\'t say.');
+    f.pasteMsg = `Filled in ${filled.join(', ')}.${issues.length ? ` ${issues.join(' ')}` : ''}`;
+  } catch (err) { f.pasteMsg = err.message; }
+}
+function applyDraft() {
+  const text = S.draft; S.draft = null;
+  const f = { ...blankForm(), split_type: 'items', paste: text };
+  fillFromBlock(f, text);
+  S.form = f; S.view = 'form'; S.tab = 'expenses'; S.error = '';
+  render(); window.scrollTo(0, 0); updateHints();
+}
+
 // ---------------------------------------------------------------- events
 document.addEventListener('click', async (ev) => {
   const el = ev.target.closest('[data-act]');
@@ -1492,10 +1613,31 @@ document.addEventListener('click', async (ev) => {
     case 'startNew': S.view = 'new'; S.newMode = 'file'; S.nt = blankNew(); render(); break;
     case 'startTab': S.view = 'newtab'; S.nt = blankNew(); render(); break;
     case 'createTab': await createTab(); break;
+    case 'toggleClaim': f.claim_open = !f.claim_open; render(); updateHints(); break;
+    case 'toggleCashback': f.cashback_on = !f.cashback_on; render(); updateHints(); break;
+    case 'openClaim': S.claimUid = d.uid; S.claimTouched = false; S.view = 'claim'; render(); window.scrollTo(0, 0); break;
+    case 'claimFromForm': S.claimUid = f.uid; S.claimTouched = false; S.form = null; S.view = 'claim'; render(); window.scrollTo(0, 0); break;
+    case 'claimItem': {
+      const e = S.expenses.find((x) => x.uid === S.claimUid); if (!e) break;
+      const i = Number(d.i);
+      const mine = new Set((e.claims || {})[S.me] || []);
+      if (mine.has(i)) mine.delete(i); else mine.add(i);
+      const list = [...mine].sort((x, y) => x - y);
+      S.claimTouched = true;
+      e.claims = { ...(e.claims || {}), [S.me]: list };
+      fireAndForget(setDoc(tripRef('expenses', e.uid), { claims: { [S.me]: list } }, { merge: true }));
+      render(); break;
+    }
+    case 'claimDone': {
+      const e = S.expenses.find((x) => x.uid === S.claimUid);
+      if (e && S.claimTouched) logActivity(`${S.me} picked their items on "${e.description}"`, 'claimed');
+      S.claimUid = null; S.claimTouched = false; S.view = 'trip'; render(); break;
+    }
+    case 'balanceMode': patchStore((st) => { st.prefs.balanceMode = d.mode; }); render(); break;
     case 'pickMonth': S.month = d.month; render(); break;
     case 'pickStmt': S.stmtMonth = d.month; render(); break;
     case 'sendStatement': {
-      const st = tabStatement(S.trip, S.expenses, S.settlements, S.stmtMonth || prevMonth(thisMonth()));
+      const st = tabStatement(S.trip, S.expenses, S.settlements, S.stmtMonth || prevMonth(thisMonth()), balanceMode());
       const text = statementMessage(S.trip.name, st, tripLink());
       if (navigator.share) { try { await navigator.share({ text }); } catch { /* cancelled */ } }
       else window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
@@ -1561,35 +1703,7 @@ document.addEventListener('click', async (ev) => {
       it.names = it.names.includes(d.name) ? it.names.filter((n) => n !== d.name) : [...it.names, d.name];
       render(); updateHints(); break;
     }
-    case 'usePaste': {
-      try {
-        const r = parseReceiptBlock(f.paste || document.getElementById('f_paste').value, S.trip.members || []);
-        const filled = [];
-        f.items = r.items.map((i) => ({ description: i.description, amount: i.amount, names: i.names }));
-        f.extras = r.extras || []; f.editItems = false; f.collapsed = [];
-        filled.push(`${r.items.length} items`);
-        if (r.extras.length) filled.push(r.extras.map((x) => x.label.toLowerCase()).join(' and '));
-        const isLocal = r.currency && r.currency !== 'GBP';
-        if (r.total != null) {
-          if (isLocal) {
-            if (f.orig_amount === '') { f.orig_amount = r.total; f.orig_currency = r.currency; filled.push(`the ${r.currency} amount`); }
-          } else if (f.amount_gbp === '') { f.amount_gbp = r.paid_gbp ?? r.total; filled.push('the pounds'); }
-        }
-        if (isLocal && r.paid_gbp && f.amount_gbp === '') { f.amount_gbp = r.paid_gbp; filled.push('the pounds paid'); }
-        if (r.place && !f.description.trim()) { f.description = r.place; filled.push('the place'); }
-        if (r.date) { f.expense_date = r.date; filled.push('the date'); }
-        if (r.category && !f.category) { f.category = r.category; f.subtype = r.subtype || ''; filled.push('the category'); }
-        if (r.paid_by) { f.paid_by = r.paid_by; filled.push('who paid'); }
-        if (r.notes && !f.notes.trim()) { f.notes = r.notes; filled.push('notes'); }
-        const issues = [];
-        if (r.fuzzy.length) issues.push(`I read ${r.fuzzy.map((x) => `"${x.given}" as ${x.matched}`).join(', ')} - check that's right.`);
-        if (r.ambiguous.length) issues.push(`${r.ambiguous.map((x) => `"${x.given}" could be ${x.options.join(' or ')}`).join('; ')} - tap the right person on those items.`);
-        if (r.unknown.length) issues.push(`I didn't recognise: ${r.unknown.join(', ')} - tap their items below to fix.`);
-        if (!r.paid_by && !f.uid) issues.push('Check who paid - the block didn\'t say.');
-        f.pasteMsg = `Filled in ${filled.join(', ')}.${issues.length ? ` ${issues.join(' ')}` : ''}`;
-      } catch (err) { f.pasteMsg = err.message; }
-      render(); updateHints(); break;
-    }
+    case 'usePaste': fillFromBlock(f, f.paste || document.getElementById('f_paste').value); render(); updateHints(); break;
     case 'saveExpense': await saveExpense(); break;
     case 'deleteExpense':
       if (confirm(`Delete "${f.description}"?`)) {
@@ -1618,7 +1732,7 @@ document.addEventListener('click', async (ev) => {
     }
     case 'whatsapp': {
       const all = computeAll(S.trip, S.expenses, S.settlements, S.adjustments);
-      const text = settleMessage(S.trip.name, all.transfers, all.total);
+      const text = settleMessage(S.trip.name, transfersFor(all), all.total);
       if (navigator.share) { try { await navigator.share({ text }); } catch { /* cancelled */ } } else { try { await navigator.clipboard.writeText(text); S.notice = 'Copied - paste it into your group chat.'; } catch { S.notice = text; } render(); }
       break;
     }
@@ -1721,6 +1835,15 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
+// Amounts are tidied as they are typed: a stray space ("6. 50"), a pound sign or a decimal comma ("6,50") would otherwise be
+// read as "not a number" and quietly counted as nothing.
+const cleanNum = (v) => {
+  let x = String(v ?? '').replace(/[£€$\s]/g, '');
+  x = /^\d+,\d{1,2}$/.test(x) ? x.replace(',', '.') : x.replace(/,/g, '');
+  return x;
+};
+const NUMERIC_FIELDS = new Set(['amount_gbp', 'orig_amount', 'rate', 'gift_card', 'cashback_pct']);
+
 // Typing updates state without redrawing (a redraw would drop the keyboard).
 document.addEventListener('input', (ev) => {
   const t = ev.target;
@@ -1730,9 +1853,9 @@ document.addEventListener('input', (ev) => {
   const f = S.form;
   if (S.view !== 'form' || !f) return;
   if (t.id === 'f_paste') { f.paste = t.value; return; }
-  if (t.id && t.id.startsWith('f_')) f[t.id.slice(2)] = t.value;
-  else if (t.dataset.item !== undefined) f.items[Number(t.dataset.item)][t.dataset.field] = t.value;
-  else if (t.dataset.val !== undefined) f.participants[t.dataset.val].value = t.value;
+  if (t.id && t.id.startsWith('f_')) f[t.id.slice(2)] = NUMERIC_FIELDS.has(t.id.slice(2)) ? cleanNum(t.value) : t.value;
+  else if (t.dataset.item !== undefined) f.items[Number(t.dataset.item)][t.dataset.field] = t.dataset.field === 'amount' ? cleanNum(t.value) : t.value;
+  else if (t.dataset.val !== undefined) f.participants[t.dataset.val].value = cleanNum(t.value);
   updateHints();
 });
 document.addEventListener('change', (ev) => {
@@ -1745,6 +1868,7 @@ document.addEventListener('change', (ev) => {
   if (t.dataset.map !== undefined) { patchStore((s) => { if (t.value) s.nameMap[t.dataset.map] = t.value; else delete s.nameMap[t.dataset.map]; }); render(); return; }
   if (t.dataset.f && t.dataset.k) { S[t.dataset.f][t.dataset.k] = t.type === 'checkbox' ? t.checked : t.value; return; }
   if (S.view !== 'form' || !f) return;
+  if ((t.id && NUMERIC_FIELDS.has(t.id.slice(2))) || t.dataset.field === 'amount' || t.dataset.val !== undefined) { const c = cleanNum(t.value); if (c !== t.value) t.value = c; }
   if (t.dataset.who !== undefined) { f.participants[t.dataset.who].on = t.checked; render(); updateHints(); }
   else if (t.id === 'f_paid_by') { f.paid_by = t.value; render(); updateHints(); }
 });

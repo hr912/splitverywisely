@@ -1,7 +1,7 @@
 // Calculations behind the Summary page, the Activity log, combined settle-up
 // across trips, the WhatsApp message and the duplicate warning. No screen, no database.
 import { toPence, toPounds, simplifyDebts, allocate } from './trip-math.js';
-import { computeAll, expenseSharesPence } from './logic.js';
+import { computeAll, expenseSharesPence, pairwiseTransfers, effPence, effectiveItems } from './logic.js';
 
 const fmt = (n) => (Number(n) || 0).toLocaleString('en-GB', { style: 'currency', currency: 'GBP' });
 
@@ -17,7 +17,7 @@ const daysBetween = (a, b) => Math.round((new Date(`${b}T12:00:00Z`) - new Date(
 export function summarize(trip, expenses, all, today, who = null) {
   const start = trip.start_date || null;
   const end = trip.end_date || start;
-  const amtOf = (e) => (who ? ((all.shareByExpense[e.uid] || {})[who] || 0) : toPence(e.amount_gbp));
+  const amtOf = (e) => (who ? ((all.shareByExpense[e.uid] || {})[who] || 0) : effPence(e));
   const days = [];
   let before = 0; let after = 0; let inTrip = 0;
   const perDay = {}; const cats = {};
@@ -186,7 +186,7 @@ export function findDuplicate(expenses, cand) {
 // Who had what on an itemised receipt: every person's items, their share of the extras (service, VAT, tip)
 // and their total - in the receipt's own currency, plus the pounds when they are known.
 export function itemisedBreakdown(e, members = []) {
-  const items = (e.items || []).filter((i) => Number(i.amount) > 0);
+  const items = effectiveItems(e).filter((i) => Number(i.amount) > 0);
   if (!items.length) return { empty: true };
   const local = items.some((i) => i.in_local) && Number(e.orig_amount) > 0;
   const cur = local ? (String(e.orig_currency || '').toUpperCase() || 'EUR') : 'GBP';
@@ -246,7 +246,7 @@ export function coverage(me, expenses, all) {
   let forOthers = 0; let byOthers = 0; let estimated = 0;
   expenses.forEach((e) => {
     const mine = (all.shareByExpense[e.uid] || {})[me] || 0;
-    const amt = toPence(e.amount_gbp);
+    const amt = effPence(e);
     if (e.paid_by === me) forOthers += Math.max(0, amt - mine); else byOthers += mine;
     if (e.gbp_estimated) estimated += mine;
   });
@@ -271,7 +271,7 @@ export function todayLine(expenses, all, me, today) {
   const todays = expenses.filter((e) => e.expense_date === today);
   if (!todays.length) return null;
   let total = 0; let mine = 0;
-  todays.forEach((e) => { total += toPence(e.amount_gbp); mine += (all.shareByExpense[e.uid] || {})[me] || 0; });
+  todays.forEach((e) => { total += effPence(e); mine += (all.shareByExpense[e.uid] || {})[me] || 0; });
   return { total: toPounds(total), mine: toPounds(mine) };
 }
 
@@ -339,7 +339,7 @@ export function monthsWithData(expenses, settlements, thisMonth) {
 export function monthTotals(expenses, months, limit = 12) {
   return months.slice(0, limit).map((m) => ({
     month: m,
-    total: toPounds(expenses.filter((e) => inMonth(e.expense_date, m)).reduce((s, e) => s + toPence(e.amount_gbp), 0)),
+    total: toPounds(expenses.filter((e) => inMonth(e.expense_date, m)).reduce((s, e) => s + effPence(e), 0)),
   }));
 }
 
@@ -354,15 +354,17 @@ export function pendingPayments(settlements, me) {
 }
 
 // Who owes whom as of the end of a month (expenses and confirmed payments dated up to then), plus that month's spending.
-export function tabStatement(trip, expenses, settlements, ym) {
+export function tabStatement(trip, expenses, settlements, ym, mode = 'simple') {
   const end = monthEnd(ym);
-  const upTo = computeAll(trip, expenses.filter((e) => !e.expense_date || e.expense_date <= end), settlements.filter((s) => !s.settle_date || s.settle_date <= end), []);
+  const exUpTo = expenses.filter((e) => !e.expense_date || e.expense_date <= end);
+  const stUpTo = settlements.filter((s) => !s.settle_date || s.settle_date <= end);
+  const upTo = computeAll(trip, exUpTo, stUpTo, []);
   const inM = expenses.filter((e) => inMonth(e.expense_date, ym));
   const month = computeAll(trip, inM, [], []);
   const waiting = settlements.filter((s) => s.status === 'claimed' && (!s.settle_date || s.settle_date <= end));
   return {
     month: ym, label: monthLabel(ym), end, monthTotal: month.total, monthCount: inM.length,
-    people: upTo.people, transfers: upTo.transfers, waiting,
+    people: upTo.people, transfers: mode === 'direct' ? pairwiseTransfers(trip, exUpTo, stUpTo) : upTo.transfers, waiting,
   };
 }
 

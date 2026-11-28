@@ -230,3 +230,9 @@ nav.tabs button .dotn { top: 4px; right: calc(50% - 22px); }
 .mrow .mb { flex: 1; height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
 .mrow .mb span { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
 .mrow b { flex: none; min-width: 74px; text-align: right; font-size: 0.9rem; }
+
+/* pick your own items */
+.claimrow { align-items: center; gap: 12px; }
+.claimrow .cbox { flex: none; width: 26px; height: 26px; border: 2px solid var(--line); border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; color: var(--on-accent); }
+.claimrow.on .cbox { background: var(--accent); border-color: var(--accent); }
+.claimrow[disabled] { opacity: 0.75; }
