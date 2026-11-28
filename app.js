@@ -1038,9 +1038,9 @@ function formView() {
       <div id="itemsum">${itemSummaryHtml(f)}</div>
       ${editorOpen ? `<p class="sub" style="margin-top:10px">Add each item and tap who had it. Service charge, VAT or tip that the items don't cover is shared in proportion to what each person had. Skipped the service? Make the bill match the items. Item amounts are in <b>${esc(itemCur === 'GBP' ? '£' : itemCur)}</b>.</p>
       ${f.items.map((it, i) => `<div class="item">
-        <div class="row"><input data-item="${i}" data-field="description" value="${esc(it.description)}" placeholder="Item"><input data-item="${i}" data-field="amount" inputmode="decimal" value="${esc(it.amount)}" placeholder="0.00" style="max-width:110px">
-        <button type="button" class="danger" data-act="removeItem" data-i="${i}">✕</button></div>
-        <div class="row" style="margin-top:6px"><input data-item="${i}" data-field="was" inputmode="decimal" value="${esc(it.was ?? '')}" placeholder="Original price before discount (optional)"></div>
+        <div class="row"><input data-item="${i}" data-field="description" value="${esc(it.description)}" placeholder="Item"><button type="button" class="danger" data-act="removeItem" data-i="${i}">✕</button></div>
+        <div class="row" style="margin-top:6px"><div class="grow"><span class="lbl">Price paid (£)</span><input data-item="${i}" data-field="amount" inputmode="decimal" value="${esc(it.amount)}" placeholder="0.00"></div>
+          <div class="grow"><span class="lbl">Original price (£)</span><input data-item="${i}" data-field="was" inputmode="decimal" value="${esc(it.was ?? '')}" placeholder="if discounted"></div></div>
         <div class="chips" style="margin-top:8px">${members.map((m) => `<button type="button" class="chip ${(it.names || []).includes(m) ? 'on' : ''}" data-act="itemWho" data-i="${i}" data-name="${esc(m)}">${esc(m)}</button>`).join('')}</div></div>`).join('')}
       <button type="button" class="secondary" data-act="addItem">+ Add item</button>
       <div id="itemsHint" class="sub" style="margin-top:8px"></div>

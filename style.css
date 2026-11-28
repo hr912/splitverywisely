@@ -241,3 +241,5 @@ nav.tabs button .dotn { top: 4px; right: calc(50% - 22px); }
 
 .amtcol { display: flex; flex-direction: column; align-items: flex-end; flex: none; }
 .was { color: var(--muted); font-size: 0.8rem; }
+
+.lbl { display: block; font-size: 0.74rem; color: var(--muted); margin: 0 0 3px 2px; }
