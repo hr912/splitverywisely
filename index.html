@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>SplitVeryWisely</title>
+  <!-- Only this site's own scripts plus Firebase and the picture-maker library may run, so nothing typed into a trip can inject code. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:; img-src 'self' data: blob:; connect-src 'self' https://firestore.googleapis.com https://*.googleapis.com; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="theme-color" content="#0e7c86">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">

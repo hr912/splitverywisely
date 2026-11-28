@@ -80,7 +80,7 @@ export function resolveTheme(value) {
     return {
       id: 'custom', name: 'Your own', blurb: 'Your colours and doodles',
       accent: [forLight(colors[0]), forDark(colors[0])], accent2: [forLight(c2), forDark(c2)],
-      stripe: colors, doodles: (value.doodles || []).slice(0, 10), greetings: GENERIC_GREETINGS,
+      stripe: colors, doodles: (value.doodles || []).filter((d) => typeof d === 'string' && /^[a-z0-9-]{1,30}$/.test(d)).slice(0, 10), greetings: GENERIC_GREETINGS,
     };
   }
   return THEMES[value.id] || THEMES.classic;
